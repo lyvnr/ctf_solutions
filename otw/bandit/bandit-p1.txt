@@ -16,7 +16,7 @@ password: bandit0
 # we can proceed to the next level using the password found in the readme file located in the home directory.
 
 $ cat readme
-[The password you are looking for is: ZjLjTmM6FvvyRnrb2rfNWOZOTa6ip5If]
+[The password you are looking for is: ZjLjTmM6FvvyRnrb2rfNWOZOTa6ip5If]                    #bandit1 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 1 -> Level 2:
@@ -24,7 +24,7 @@ $ cat readme
 # To read it, you need to do the following:
 
 $ cat ./-
-263JGJPfgU6LtdEvgfWU1XP5yac29mFx
+263JGJPfgU6LtdEvgfWU1XP5yac29mFx       #bandit2 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 2 -> Level 3:
@@ -41,7 +41,7 @@ MNk8KNH3Usiio41PRUEoDFPqfxLPlSmx
 
 3.Using the escape character:
 bandit2@bandit:~$ cat ./--spaces\ in\ this\ filename--
-MNk8KNH3Usiio41PRUEoDFPqfxLPlSmx
+MNk8KNH3Usiio41PRUEoDFPqfxLPlSmx                         #bandit3 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 3 -> Level 4:
@@ -56,7 +56,7 @@ drwxr-xr-x 2 root    root    4096 Oct 14 09:26 .
 drwxr-xr-x 3 root    root    4096 Oct 14 09:26 ..
 -rw-r----- 1 bandit4 bandit3   33 Oct 14 09:26 ...Hiding-From-You
 bandit3@bandit:~/inhere$ cat ...Hiding-From-You 
-2WmrDFRmJIq3IPxneAaMGhap0pFhF3NJ
+2WmrDFRmJIq3IPxneAaMGhap0pFhF3NJ                         #bandit4 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 4 -> Level 5:
@@ -84,7 +84,7 @@ I�� ��V`n�5���ѳ��*�G^7؅cO�bandit4@bandit:~/inhere$rese
 
 # The file containing the password:
 bandit4@bandit:~/inhere$ cat ./-file07
-4oQYVPkxZOOEOO5pTW81FB8j8lxXGUQw
+4oQYVPkxZOOEOO5pTW81FB8j8lxXGUQw                         #bandit5 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 5 -> Level 6:
@@ -104,7 +104,7 @@ maybehere02  maybehere05  maybehere08  maybehere11  maybehere14  maybehere17
 bandit5@bandit:~/inhere$ find . -type f -size 1033c ! -executable
 ./maybehere07/.file2
 bandit5@bandit:~/inhere$ cat ./maybehere07/.file2
-HWasnPhtq9AVKe0dmk45nxy20cvUa6EG
+HWasnPhtq9AVKe0dmk45nxy20cvUa6EG                           #bandit6 password
 
 !!! Command explanation:
 `find .`: Starts the search from the current directory (.). It includes all subfolders.
@@ -124,7 +124,7 @@ HWasnPhtq9AVKe0dmk45nxy20cvUa6EG
 bandit6@bandit:~$ find / -user bandit7 -group bandit6 2>/dev/null
 /var/lib/dpkg/info/bandit7.password
 bandit6@bandit:~$ cat /var/lib/dpkg/info/bandit7.password 
-morbNTDkSW6jIlUc0ymOdMaLnOlFVAaj
+morbNTDkSW6jIlUc0ymOdMaLnOlFVAaj                              #bandit7 password
 
 !!! Command explanation:
 `find /`: Starts the search from the root directory (/). This scans the entire system and all folders.
@@ -160,7 +160,7 @@ millionth       dfwvzFQi4mU0wfNbFOe9RoWskMLg7eEc
 
 2. Using strings:
 bandit7@bandit:~$ strings data.txt | grep "millionth"
-millionth       dfwvzFQi4mU0wfNbFOe9RoWskMLg7eEc
+millionth       dfwvzFQi4mU0wfNbFOe9RoWskMLg7eEc                    #bandit8 password
 --------------------------------------------------------------------------------------------------------
 
 [+]Level 8 -> Level 9:
@@ -209,7 +209,7 @@ bandit8@bandit:~$ sort data.txt | uniq -c
       .
       .
       .
-password:4CKMh1JI91bUIZZPXDqGanal4xvAg0JM
+password:4CKMh1JI91bUIZZPXDqGanal4xvAg0JM   #bandit9 password
 
 !!! Command explanation:
 `sort data.txt`: Sorts all lines in the file alphabetically. This is very important because the `uniq` command can only compare consecutive lines.
@@ -229,7 +229,7 @@ bandit9@bandit:~$ strings data.txt | grep ==
 ========== the
 ========== password
 f\Z'========== is
-========== FGUW5ilLVJrxX9kMYMmlN4MgbpfMiqey
+========== FGUW5ilLVJrxX9kMYMmlN4MgbpfMiqey                    #bandit10 password
 bandit9@bandit:~$ 
 
 !!! Explanation:
@@ -246,7 +246,7 @@ total 4
 bandit10@bandit:~$ cat data.txt 
 VGhlIHBhc3N3b3JkIGlzIGR0UjE3M2ZaS2IwUlJzREZTR3NnMlJXbnBOVmozcVJyCg==
 bandit10@bandit:~$ echo "VGhlIHBhc3N3b3JkIGlzIGR0UjE3M2ZaS2IwUlJzREZTR3NnMlJXbnBOVmozcVJyCg==" | base64 -d
-The password is dtR173fZKb0RRsDFSGsg2RWnpNVj3qRr
+The password is dtR173fZKb0RRsDFSGsg2RWnpNVj3qRr               #bandit11 password
 
 !!! Command explanation: 
 echo "...": Passes the seemingly complex text inside the quotation marks to the next command.
@@ -266,7 +266,7 @@ total 4
 bandit11@bandit:~$ cat data.txt 
 Gur cnffjbeq vf 7k16JArUVv5LxVuJfsSVdbbtaHGlw9D4
 bandit11@bandit:~$ cat data.txt | tr 'A-Za-z' 'N-ZA-Mn-za-m'
-The password is 7x16WNeHIi5YkIhWsfFIqoognUTyj9Q4
+The password is 7x16WNeHIi5YkIhWsfFIqoognUTyj9Q4             #bandit12 password
 
 !!! Command explanation:
 `cat data.txt`: Reads the encrypted text.
